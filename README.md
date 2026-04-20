@@ -61,21 +61,21 @@ Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
 
 | Level | Compressed | Ratio | Compress | Decompress |
 |-------|------------|-------|----------|------------|
-| L1  | 59,102,816 | 59.1% |  98.6 MB/s | 34,947 MB/s |
-| L2  | 57,298,758 | 57.3% |  85.9 MB/s | 34,778 MB/s |
-| L3  | 56,937,334 | 56.9% |  81.8 MB/s | 32,548 MB/s |
-| L4  | 54,303,437 | 54.3% |  81.7 MB/s | 33,298 MB/s |
-| L5  | 43,112,965 | 43.1% |  39.3 MB/s | 13,009 MB/s |
-| L6  | 31,793,212 | 31.8% |  77.5 MB/s | 15,306 MB/s |
-| L7  | 31,717,862 | 31.7% |  55.1 MB/s | 15,706 MB/s |
-| L8  | 31,436,039 | 31.4% |  39.0 MB/s | 15,408 MB/s |
-| L9  | 28,396,689 | 28.4% |   7.8 MB/s |  2,136 MB/s |
-| L10 | 28,253,307 | 28.3% |   7.6 MB/s |  2,187 MB/s |
-| L11 | 26,850,856 | 26.9% |   1.2 MB/s |  2,033 MB/s |
+| L1  | 58,634,412 | 58.6% | 4,765 MB/s | 35,111 MB/s |
+| L2  | 56,882,861 | 56.9% |  85.7 MB/s | 30,271 MB/s |
+| L3  | 56,522,955 | 56.5% |  82.1 MB/s | 29,649 MB/s |
+| L4  | 53,963,934 | 54.0% |  82.0 MB/s | 34,592 MB/s |
+| L5  | 43,376,368 | 43.4% |  39.1 MB/s | 11,203 MB/s |
+| L6  | 31,376,255 | 31.4% |  82.0 MB/s | 15,501 MB/s |
+| L7  | 31,299,037 | 31.3% |  57.2 MB/s | 15,701 MB/s |
+| L8  | 30,997,739 | 31.0% |  40.3 MB/s | 15,354 MB/s |
+| L9  | 27,430,880 | 27.4% |   7.5 MB/s |  1,576 MB/s |
+| L10 | 27,280,109 | 27.3% |   7.4 MB/s |  2,177 MB/s |
+| L11 | 25,550,460 | 25.6% |   1.2 MB/s |  1,438 MB/s |
 
-All decompress numbers use parallel dispatch (24 cores). L1 compress
-is parallel (SC mode); L2-L5 compress is serial; L6-L11 compress is
-parallel (High codec).
+All numbers use parallel dispatch (24 cores). L1 compress is parallel
+(SC mode, per-chunk workers); L2-L5 compress is serial; L6-L11
+compress is parallel (High codec).
 
 ---
 
