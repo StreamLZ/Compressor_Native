@@ -35,17 +35,27 @@ pub inline fn extendMatchForward(
     recent_offset: isize,
 ) [*]const u8 {
     var s = source;
-    while (@intFromPtr(s) < @intFromPtr(source_end)) {
+    // 8-byte comparison loop — halves iterations and branch mispredicts.
+    while (@intFromPtr(s) + 8 <= @intFromPtr(source_end)) {
+        const lhs: u64 = std.mem.readInt(u64, s[0..8], .little);
+        const rhs_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, recent_offset);
+        const rhs: u64 = std.mem.readInt(u64, rhs_ptr[0..8], .little);
+        const xor = lhs ^ rhs;
+        if (xor != 0) {
+            return s + (@as(usize, @ctz(xor)) >> 3);
+        }
+        s += 8;
+    }
+    // 4-byte tail
+    if (@intFromPtr(s) + 4 <= @intFromPtr(source_end)) {
         const lhs: u32 = std.mem.readInt(u32, s[0..4], .little);
         const rhs_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, recent_offset);
         const rhs: u32 = std.mem.readInt(u32, rhs_ptr[0..4], .little);
         const xor = lhs ^ rhs;
-        s += 4;
         if (xor != 0) {
-            const tz_bits: u32 = @ctz(xor);
-            s = s + @as(usize, tz_bits >> 3) - 4;
-            break;
+            return s + (@as(usize, @ctz(xor)) >> 3);
         }
+        s += 4;
     }
     return if (@intFromPtr(s) < @intFromPtr(source_end)) s else source_end;
 }
