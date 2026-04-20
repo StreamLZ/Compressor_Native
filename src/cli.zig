@@ -852,33 +852,38 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
     const decompressed = try allocator.alloc(u8, src.len + decoder.safe_space);
     defer allocator.free(decompressed);
 
-    // ── LZ4 default (single-threaded, no MT API) ──
+    // ── LZ4 default (MT, 4 MB blocks like the CLI) ──
     {
-        try w.writeAll("  LZ4 default ...");
+        try w.writeAll("  LZ4 MT ...");
         try w.flush();
-        const warmup_size = lz4.compress(compressed, src) catch 0;
-        if (warmup_size > 0) {
+        var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), null) catch null;
+        if (warmup_result) |*wr| {
+            wr.deinit();
             var best_comp_ns: u64 = std.math.maxInt(u64);
-            var comp_size: usize = warmup_size;
+            var total_compressed: usize = 0;
+            var mt_result: ?lz4.MtResult = null;
             for (0..runs) |_| {
+                if (mt_result) |*prev| prev.deinit();
                 var timer = try std.time.Timer.start();
-                comp_size = try lz4.compress(compressed, src);
+                mt_result = try lz4.compressMt(allocator, src, @intCast(threads), null);
                 const elapsed = timer.read();
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
-            _ = try lz4.decompress(decompressed, compressed[0..comp_size], src.len);
+            try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
                 var timer = try std.time.Timer.start();
-                _ = try lz4.decompress(decompressed, compressed[0..comp_size], src.len);
+                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
                 const elapsed = timer.read();
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
+            mt_result.?.deinit();
             const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
             const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
-            results[result_count].setName("LZ4");
-            results[result_count].comp_size = comp_size;
-            results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+            results[result_count].setName("LZ4 MT");
+            results[result_count].comp_size = total_compressed;
+            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
             results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
             results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
             result_count += 1;
@@ -889,36 +894,41 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         try w.flush();
     }
 
-    // ── LZ4 HC levels 4, 9, 12 ──
+    // ── LZ4 HC levels 4, 9, 12 (MT, 4 MB blocks) ──
     const lz4_hc_levels = [_]c_int{ 4, 9, 12 };
     for (lz4_hc_levels) |hc_level| {
         var name_buf: [16]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "LZ4 HC {d}", .{hc_level}) catch "LZ4 HC ?";
+        const name = std.fmt.bufPrint(&name_buf, "LZ4 HC {d} MT", .{hc_level}) catch "LZ4 HC ?";
         try w.print("  {s} ...", .{name});
         try w.flush();
-        const warmup_size = lz4.compressHc(compressed, src, hc_level) catch 0;
-        if (warmup_size > 0) {
+        var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), hc_level) catch null;
+        if (warmup_result) |*wr| {
+            wr.deinit();
             var best_comp_ns: u64 = std.math.maxInt(u64);
-            var comp_size: usize = warmup_size;
+            var total_compressed: usize = 0;
+            var mt_result: ?lz4.MtResult = null;
             for (0..runs) |_| {
+                if (mt_result) |*prev| prev.deinit();
                 var timer = try std.time.Timer.start();
-                comp_size = try lz4.compressHc(compressed, src, hc_level);
+                mt_result = try lz4.compressMt(allocator, src, @intCast(threads), hc_level);
                 const elapsed = timer.read();
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
-            _ = try lz4.decompress(decompressed, compressed[0..comp_size], src.len);
+            try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
                 var timer = try std.time.Timer.start();
-                _ = try lz4.decompress(decompressed, compressed[0..comp_size], src.len);
+                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
                 const elapsed = timer.read();
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
+            mt_result.?.deinit();
             const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
             const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
             results[result_count].setName(name);
-            results[result_count].comp_size = comp_size;
-            results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+            results[result_count].comp_size = total_compressed;
+            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
             results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
             results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
             result_count += 1;
@@ -1040,10 +1050,10 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         });
     }
 
-    try w.print("\nThreading ({d} threads):\n", .{threads});
-    try w.writeAll("  LZ4:      compress 1T, decompress 1T (no MT API)\n");
-    try w.writeAll("  zstd:     compress MT, decompress 1T\n");
-    try w.writeAll("  StreamLZ: compress MT (L6+), decompress MT (all levels)\n");
+    try w.print("\nThreading ({d} threads, 4 MB blocks for LZ4):\n", .{threads});
+    try w.writeAll("  LZ4:      compress MT, decompress MT (4 MB independent blocks)\n");
+    try w.writeAll("  zstd:     compress MT (ZSTD_c_nbWorkers), decompress 1T\n");
+    try w.writeAll("  StreamLZ: compress MT (L1, L6+), decompress MT (all levels)\n");
 }
 
 fn fmtMbps(buf: []u8, value: f64) []const u8 {
