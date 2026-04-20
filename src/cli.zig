@@ -939,36 +939,41 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         try w.flush();
     }
 
-    // ── zstd levels 1, 3, 9, 19 (with MT compress) ──
+    // ── zstd levels 1, 3, 9, 19 (MT block-parallel, 4 MB blocks) ──
     const zstd_levels = [_]c_int{ 1, 3, 9, 19 };
     for (zstd_levels) |zstd_level| {
         var name_buf: [16]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "zstd {d}", .{zstd_level}) catch "zstd ?";
+        const name = std.fmt.bufPrint(&name_buf, "zstd {d} MT", .{zstd_level}) catch "zstd ?";
         try w.print("  {s} ...", .{name});
         try w.flush();
-        const warmup_size = zstd.compressMt(compressed, src, zstd_level, threads) catch 0;
-        if (warmup_size > 0) {
+        var warmup_result = zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level) catch null;
+        if (warmup_result) |*wr| {
+            wr.deinit();
             var best_comp_ns: u64 = std.math.maxInt(u64);
-            var comp_size: usize = warmup_size;
+            var total_compressed: usize = 0;
+            var mt_result: ?zstd.MtResult = null;
             for (0..runs) |_| {
+                if (mt_result) |*prev| prev.deinit();
                 var timer = try std.time.Timer.start();
-                comp_size = try zstd.compressMt(compressed, src, zstd_level, threads);
+                mt_result = try zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level);
                 const elapsed = timer.read();
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
-            _ = try zstd.decompress(decompressed[0..src.len], compressed[0..comp_size]);
+            try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
                 var timer = try std.time.Timer.start();
-                _ = try zstd.decompress(decompressed[0..src.len], compressed[0..comp_size]);
+                try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
                 const elapsed = timer.read();
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
+            mt_result.?.deinit();
             const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
             const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
             results[result_count].setName(name);
-            results[result_count].comp_size = comp_size;
-            results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+            results[result_count].comp_size = total_compressed;
+            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
             results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
             results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
             result_count += 1;
@@ -1050,9 +1055,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         });
     }
 
-    try w.print("\nThreading ({d} threads, 4 MB blocks for LZ4):\n", .{threads});
-    try w.writeAll("  LZ4:      compress MT, decompress MT (4 MB independent blocks)\n");
-    try w.writeAll("  zstd:     compress MT (ZSTD_c_nbWorkers), decompress 1T\n");
+    try w.print("\nThreading ({d} threads, 4 MB independent blocks):\n", .{threads});
+    try w.writeAll("  LZ4:      compress MT, decompress MT\n");
+    try w.writeAll("  zstd:     compress MT, decompress MT\n");
     try w.writeAll("  StreamLZ: compress MT (L1, L6+), decompress MT (all levels)\n");
 }
 
