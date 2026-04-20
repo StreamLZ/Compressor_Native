@@ -1,6 +1,6 @@
 # SLZ1 Frame Format Specification
 
-**Version:** 1
+**Version:** 2
 **Status:** Stable (backward-compatible changes only)
 **Byte order:** Little-endian unless otherwise noted
 **Notation:** `BSR(x)` denotes Bit Scan Reverse — the 0-based index of the most significant set bit, equivalent to `floor(log2(x))` for x > 0.
@@ -18,27 +18,29 @@ The design is similar in spirit to LZ4 frames and Zstandard frames: a magic numb
 ## Frame Structure
 
 ```
-┌──────────────────────┐
-│    Frame Header       │  10-22 bytes
-├──────────────────────┤
-│    Block 0            │  8 bytes header + payload
-├──────────────────────┤
-│    Block 1            │  8 bytes header + payload
-├──────────────────────┤
-│    ...                │
-├──────────────────────┤
-│    End Mark           │  4 bytes (0x00000000)
-├──────────────────────┤
-│    Content Checksum   │  4 bytes (optional)
-└──────────────────────┘
+┌──────────────────────────┐
+│    Frame Header           │  14-26 bytes
+├──────────────────────────┤
+│    Block 0                │  8 bytes header + payload
+├──────────────────────────┤
+│    Block 1                │  8 bytes header + payload
+├──────────────────────────┤
+│    ...                    │
+├──────────────────────────┤
+│    Sidecar Block          │  (optional, Fast L1-L5 only)
+├──────────────────────────┤
+│    End Mark               │  4 bytes (0x00000000)
+├──────────────────────────┤
+│    Content Checksum       │  4 bytes (optional)
+└──────────────────────────┘
 ```
 
 ---
 
 ## Frame Header
 
-**Minimum size:** 10 bytes (no optional fields)
-**Maximum size:** 22 bytes (all optional fields present)
+**Minimum size:** 14 bytes (no optional fields)
+**Maximum size:** 26 bytes (all optional fields present)
 
 ```
 Offset  Size  Field
@@ -49,20 +51,22 @@ Offset  Size  Field
 6       1     Codec ID
 7       1     Compression level (1-9 codec level; user-facing levels 1-11 map to these)
 8       1     Block size (log2 encoding, see below)
-9       1     Reserved (must be 0)
-10      8     Content size (int64, present if flag bit 0 set)
-18      4     Dictionary ID (uint32, present if flag bit 3 set)
+9       1     SC group size (chunks per self-contained group; typically 4)
+10      4     Reserved (must be 0)
+14      8     Content size (int64, present if flag bit 0 set)
+22      4     Dictionary ID (uint32, present if flag bit 3 set)
 ```
 
 ### Flags (byte at offset 5)
 
-| Bit | Name                 | Meaning                                           |
-|-----|----------------------|---------------------------------------------------|
-| 0   | ContentSizePresent   | 8-byte content size follows the fixed header       |
-| 1   | ContentChecksum      | 4-byte XXH32 checksum after the end mark           |
-| 2   | BlockChecksums       | 4-byte XXH32 checksum after each block payload     |
-| 3   | DictionaryIdPresent  | 4-byte dictionary ID follows content size (if any) |
-| 4-7 | Reserved             | Must be 0                                          |
+| Bit | Name                         | Meaning                                           |
+|-----|------------------------------|---------------------------------------------------|
+| 0   | ContentSizePresent           | 8-byte content size follows the fixed header       |
+| 1   | ContentChecksum              | 4-byte XXH32 checksum after the end mark           |
+| 2   | BlockChecksums               | 4-byte XXH32 checksum after each block payload     |
+| 3   | DictionaryIdPresent          | 4-byte dictionary ID follows content size (if any) |
+| 4   | ParallelDecodeMetadataPresent | Frame contains a sidecar block for parallel Fast decode |
+| 5-7 | Reserved                     | Must be 0                                          |
 
 ### Codec ID (byte at offset 6)
 
@@ -91,6 +95,12 @@ blockSize = 1 << (value + 16)
 
 The block size must be a power of 2 in the range [64 KB, 4 MB].
 
+### SC Group Size (byte at offset 9)
+
+Number of 256 KB chunks per self-contained group. Must be 1-255 (0 is
+invalid). Currently always 4 in practice. Decoders must use this value,
+not a hardcoded constant, when walking SC-block group boundaries.
+
 ---
 
 ## Block Header
@@ -100,20 +110,25 @@ Each block is preceded by an 8-byte header:
 ```
 Offset  Size  Field
 ─────────────────────────────────────────
-0       4     Compressed size (uint32)
-4       4     Decompressed size (int32)
+0       4     Compressed size (uint32, with flag bits)
+4       4     Decompressed size (uint32)
 ```
 
-**Compressed size field:**
-- Bit 31 (0x80000000): if set, the block is **uncompressed** (stored). The payload contains raw bytes with **no internal block header and no chunk headers** — the decompressor copies the payload directly to the output.
-- Bits 0-30: compressed payload size in bytes.
-- A value of 0x00000000 in the first 4 bytes is the **end mark** (no decompressed size follows).
+**Compressed size field flags:**
 
-> **Uncompressed block precedence:** When bit 31 is set in the block header, the entire payload is raw data. The internal block header (2-byte codec/flags) and chunk headers are **not present**. The internal block header's own `Uncompressed` flag (byte 0, bit 7) is a separate mechanism used within compressed blocks to signal that individual chunks within the block are stored uncompressed but still wrapped in the chunk header structure.
+| Bit | Name                        | Meaning |
+|-----|-----------------------------|---------|
+| 31  | Uncompressed                | Block is stored (raw bytes, no chunk headers) |
+| 30  | ParallelDecodeMetadata      | Block is a sidecar (see below), not decompressible data |
+| 0-29 | Size                       | Compressed payload size in bytes |
 
-**Decompressed size field:**
-- The number of bytes this block produces when decompressed.
-- For the last block in a stream, this may be smaller than the frame's block size.
+- A value of `0x00000000` in the first 4 bytes is the **end mark** (no decompressed size follows).
+
+**Uncompressed blocks:** When bit 31 is set, the entire payload is raw data with no internal block header and no chunk headers. The decompressor copies the payload directly to the output.
+
+**Sidecar blocks:** When bit 30 is set, the block carries parallel-decode metadata. Its `decompressed_size` is 0; it produces no output. Serial decoders must skip the `compressed_size` bytes and advance without writing to dst. See the [Sidecar Block](#sidecar-block-parallel-decode-metadata) section.
+
+**Decompressed size:** The number of bytes this block produces when decompressed. For the last block in a stream, this may be smaller than the frame's block size.
 
 ---
 
@@ -162,9 +177,17 @@ Byte 1 (bit layout):
 
 ### SelfContained flag
 
-When set, chunks are grouped (default: 4 chunks per group) for parallel decompression. Within a group, chunks are decoded sequentially and may reference output from earlier chunks in the same group via LZ back-references. Between groups, there are no cross-references, enabling full parallelism across groups. The group size is a compressor/decompressor constant (`ScGroupSize = 4`), not stored in the bitstream. When clear, chunks may reference data decoded by any earlier chunk within the same block.
+When set, chunks are grouped (default: 4 chunks per group, stored in the frame header's `sc_group_size` field) for parallel decompression. Within a group, chunks are decoded sequentially and may reference output from earlier chunks in the same group via LZ back-references. Between groups, there are no cross-references, enabling full parallelism across groups.
 
 **Self-contained prefix table:** When SelfContained is set, the block payload is followed by a suffix table containing the first 8 bytes of each chunk except the first. This table has `(numChunks - 1) * 8` bytes. During parallel decompression, each chunk's initial 8 bytes may be decoded incorrectly (the LZ back-reference for `InitialRecentOffset = 8` cannot reach the prior chunk's output). After all chunks are decoded, the decompressor overwrites each chunk's first 8 bytes from this table to restore correctness.
+
+---
+
+## Sub-chunk Structure (Fast codec)
+
+Each 256 KB chunk in the Fast codec is divided into two **sub-chunks** of up to 128 KB each. Each sub-chunk has its own independent set of six encoded streams. The first sub-chunk covers bytes [0, 131072) of the chunk output; the second covers [131072, 262144).
+
+Sub-chunk boundaries are significant for the sidecar: the cross-chunk dependency analysis operates at chunk granularity, and the parallel decode worker assignment operates at slice boundaries that are multiples of 16 chunks (4 MB).
 
 ---
 
@@ -204,11 +227,93 @@ If the `UseChecksums` flag is set in the internal block header, 3 bytes of check
 
 ---
 
+## Sidecar Block (Parallel-Decode Metadata)
+
+The sidecar block enables parallel Fast decode for L1-L5. It is an
+optional block marked with bit 30 (`ParallelDecodeMetadata`) in the
+block header's compressed_size field. Sidecar blocks have
+`decompressed_size == 0` and produce no output.
+
+The sidecar carries the pre-computed cross-chunk dependency data that
+the parallel decoder needs to execute before spawning per-slice worker
+threads: match copy operations and literal byte values that cross slice
+boundaries.
+
+### When present
+
+The sidecar is emitted when the frame header's flag bit 4
+(`ParallelDecodeMetadataPresent`) is set. This occurs only for Fast
+codec (L1-L5) frames. High codec (L6-L11) frames never carry a
+sidecar — L6-L8 use SC group-parallel decode, and L9-L11 use two-phase
+parallel decode, neither of which requires a sidecar.
+
+### Sidecar block body wire format
+
+```
+Offset  Size      Field
+─────────────────────────────────────────
+0       4         Magic: 'PDSC' (0x43534450 LE)
+4       1         Sidecar version (must be 2)
+5       3         Reserved (must be 0)
+8       varint    num_match_ops (LEB128 u32)
+8+N     varint    num_literal_runs (LEB128 u32)
+```
+
+Followed by two sections:
+
+#### Match ops section
+
+For each match op (in monotonically-increasing target_start order):
+
+| Field | Encoding | Description |
+|-------|----------|-------------|
+| delta_target | varint | `target_start - prev_target_start` (prev = 0 for first) |
+| offset | varint | `target_start - src_start` (always > 0) |
+| length | varint | Number of bytes to copy |
+
+The decoder executes these as byte-wise forward copies: `dst[target_start .. target_start+length] = dst[src_start .. src_start+length]`. These propagate cross-slice match chain values.
+
+#### Literal runs section
+
+For each run (consecutive-position byte groups, sorted by position):
+
+| Field | Encoding | Description |
+|-------|----------|-------------|
+| delta_position | varint | `run_start - prev_run_end` (prev_run_end = 0 for first) |
+| run_length | varint | Number of consecutive bytes |
+| bytes | raw | `run_length` literal byte values |
+
+The decoder writes these directly to dst at the indicated positions.
+
+### Compression characteristics
+
+Delta encoding makes positions 1-2 varint bytes each instead of 8 raw bytes. Match offsets are stored as `target - src` (small positive integers). Literal bytes are grouped into maximal consecutive runs to amortize the per-byte position overhead.
+
+Typical sidecar sizes:
+- L1-L4 enwik8 (100 MB): ~150 KB (~0.15% of input)
+- L5 enwik8 (100 MB): ~1.2 MB (~1.2% of input)
+
+L5 sidecars are larger because the lazy parser produces longer-distance matches with deeper transitive cross-chunk dependency chains.
+
+### Decoder behavior
+
+1. Parse the sidecar block body.
+2. Execute all `literal_bytes` as scattered writes to dst (serial).
+3. Execute all `match_ops` as sequential forward copies to dst (serial).
+4. Dispatch parallel workers, each decoding a contiguous slice of chunks.
+
+Decoders that recognize the block flag but don't support parallel decode
+must skip the sidecar block by advancing past its `compressed_size`
+bytes. The sidecar is redundant — the serial decoder produces identical
+output without it.
+
+---
+
 ## Codec Wire Formats
 
 ### Fast/Turbo Codec (6-stream format)
 
-The Fast codec splits each chunk into up to two 64 KB sub-chunks, with six parallel byte streams:
+The Fast codec splits each chunk into up to two 128 KB sub-chunks, with six parallel byte streams per sub-chunk:
 
 | Stream      | Type     | Content                                         |
 |-------------|----------|-------------------------------------------------|
@@ -273,7 +378,7 @@ In the framed streaming API, a **sliding window** provides cross-block back-refe
 - The compressor maintains a buffer of `windowSize + blockSize` bytes.
 - After compressing each block, decoded output slides forward: the most recent `windowSize` bytes are retained as dictionary context for the next block.
 - The decompressor maintains the same window and passes the dictionary context to the block decoder so LZ back-references can reach into previously decoded blocks.
-- Default window size: 128 MB. Maximum: 1 GB.
+- Default window size: 128 MB. L11 uses 128 MB for best ratio.
 
 When `SelfContained` mode is enabled, chunks are grouped (4 per group by default). Cross-group references are disabled, enabling parallel decompression. Within a group, chunks are decoded sequentially with cross-chunk context. Cross-block references via the sliding window are still active unless the frame compressor operates in fully independent mode.
 
@@ -313,6 +418,7 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 | Magic number       | 0x534C5A31  | "SLZ1" in little-endian            |
 | Version            | 1           | Current format version             |
 | Chunk size         | 262,144     | 256 KB                             |
+| Sub-chunk size     | 131,072     | 128 KB (Fast codec only)           |
 | Min block size     | 65,536      | 64 KB                              |
 | Max block size     | 4,194,304   | 4 MB                               |
 | Default block size | 262,144     | 256 KB (= chunk size)              |
@@ -321,4 +427,17 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 | SafeSpace          | 64          | Extra bytes needed past output end |
 | Huffman LUT bits   | 11          | 2048-entry decode table            |
 | Initial copy bytes | 8           | Verbatim bytes at chunk start      |
-| SC group size      | 4           | Chunks per group in self-contained mode |
+| SC group size      | 4           | Chunks per group in self-contained mode (default) |
+| Sidecar magic      | 0x43534450  | "PDSC" in little-endian            |
+| Sidecar version    | 2           | Current sidecar format version     |
+
+---
+
+## Parallel Decode Strategy Summary
+
+| Levels | Codec | Strategy | Mechanism |
+|--------|-------|----------|-----------|
+| L1-L4  | Fast  | Sidecar parallel | Small sidecar (~0.15% overhead) carries cross-chunk match ops + literal leaves. Workers decode contiguous slices independently. |
+| L5     | Fast  | Sidecar parallel | Larger sidecar (~1.2% overhead) with cross-chunk source bytes at transitive depth >= 1. Workers constrained to 16-chunk slice boundaries. |
+| L6-L8  | High  | SC group-parallel | Encoder constrains chunks to self-contained groups (4 chunks / 1 MB). Each group decoded independently, no sidecar needed. |
+| L9-L11 | High  | Two-phase parallel | Phase 1: parallel entropy decode + token resolution. Phase 2: serial token execution. No sidecar (64 MB dictionary window makes cross-slice deps ubiquitous). |
