@@ -54,28 +54,55 @@ before running tests.
 
 ## Benchmarks
 
-Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
-`-Doptimize=ReleaseFast`. All numbers from `streamlz -ba -r 3 --no-dict`.
+Intel Core Ultra 9 285K (Arrow Lake-S), Windows 11, `-Doptimize=ReleaseFast`.
+Corpus: enwik8 (100 MB English text). Best of 3 runs.
 
-### enwik8 (100 MB English text)
+### vs zstd and LZ4 (8 threads, enwik8)
+
+Fair comparison — 8 threads for all compressors. LZ4 compress is
+single-threaded (no MT API); zstd uses `ZSTD_c_nbWorkers=8`; zstd
+decompress is single-threaded. StreamLZ uses 8 threads for both.
+
+| Compressor | Ratio | Compress | Decompress | Notes |
+|-----------|-------|----------|------------|-------|
+| LZ4       | 57.3% |    693 MB/s |  4,973 MB/s | compress 1T |
+| LZ4 HC 9  | 42.2% |     52 MB/s |  4,760 MB/s | compress 1T |
+| zstd 1    | 40.7% |  2,647 MB/s |  1,911 MB/s | decompress 1T |
+| zstd 3    | 35.4% |  1,227 MB/s |  1,630 MB/s | decompress 1T |
+| zstd 9    | 31.1% |    183 MB/s |  2,016 MB/s | decompress 1T |
+| zstd 19   | 26.9% |    4.8 MB/s |  1,825 MB/s | decompress 1T |
+| **SLZ L1**  | 58.6% |  **2,331 MB/s** | **28,571 MB/s** | |
+| **SLZ L3**  | 56.5% |     83 MB/s | **20,439 MB/s** | compress 1T |
+| **SLZ L5**  | 43.4% |     39 MB/s |  **9,404 MB/s** | compress 1T |
+| **SLZ L6**  | 31.4% |     37 MB/s |  **6,931 MB/s** | |
+| **SLZ L9**  | 27.4% |    6.6 MB/s |  2,101 MB/s | |
+| **SLZ L11** | 25.6% |    1.1 MB/s |  1,937 MB/s | |
+
+At comparable ratios: SLZ decompresses **3.4x faster** than zstd at
+the ~31% tier (L6 vs zstd 9) and **5.7x faster** than LZ4 at ~57%
+(L1 vs LZ4). SLZ L1 compress nearly matches zstd 1 while
+decompressing **15x faster**.
+
+### All levels (24 cores, enwik8)
+
+Full-speed numbers with all 24 cores. `streamlz -ba -r 3 --no-dict`.
 
 | Level | Compressed | Ratio | Compress | Decompress |
 |-------|------------|-------|----------|------------|
 | L1  | 58,634,412 | 58.6% | 4,765 MB/s | 35,111 MB/s |
-| L2  | 56,882,861 | 56.9% |  85.7 MB/s | 30,271 MB/s |
-| L3  | 56,522,955 | 56.5% |  82.1 MB/s | 29,649 MB/s |
-| L4  | 53,963,934 | 54.0% |  82.0 MB/s | 34,592 MB/s |
-| L5  | 43,376,368 | 43.4% |  39.1 MB/s | 11,203 MB/s |
-| L6  | 31,376,255 | 31.4% |  82.0 MB/s | 15,501 MB/s |
-| L7  | 31,299,037 | 31.3% |  57.2 MB/s | 15,701 MB/s |
-| L8  | 30,997,739 | 31.0% |  40.3 MB/s | 15,354 MB/s |
+| L2  | 56,882,861 | 56.9% |    86 MB/s | 30,271 MB/s |
+| L3  | 56,522,955 | 56.5% |    82 MB/s | 29,649 MB/s |
+| L4  | 53,963,934 | 54.0% |    82 MB/s | 34,592 MB/s |
+| L5  | 43,376,368 | 43.4% |    39 MB/s | 11,203 MB/s |
+| L6  | 31,376,255 | 31.4% |    82 MB/s | 15,501 MB/s |
+| L7  | 31,299,037 | 31.3% |    57 MB/s | 15,701 MB/s |
+| L8  | 30,997,739 | 31.0% |    40 MB/s | 15,354 MB/s |
 | L9  | 27,430,880 | 27.4% |   7.5 MB/s |  1,576 MB/s |
 | L10 | 27,280,109 | 27.3% |   7.4 MB/s |  2,177 MB/s |
 | L11 | 25,550,460 | 25.6% |   1.2 MB/s |  1,438 MB/s |
 
-All numbers use parallel dispatch (24 cores). L1 compress is parallel
-(SC mode, per-chunk workers); L2-L5 compress is serial; L6-L11
-compress is parallel (High codec).
+L1 compress is parallel (SC, per-chunk workers); L2-L5 serial; L6-L11
+parallel (High codec). All decompress is parallel.
 
 ---
 
