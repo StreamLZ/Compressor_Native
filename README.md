@@ -59,29 +59,40 @@ Corpus: enwik8 (100 MB English text). Best of 3 runs.
 
 ### vs zstd and LZ4 (8 threads, enwik8)
 
-Fair comparison — 8 threads for all compressors. LZ4 compress is
-single-threaded (no MT API); zstd uses `ZSTD_c_nbWorkers=8`; zstd
-decompress is single-threaded. StreamLZ uses 8 threads for both.
+Fair comparison — 8 threads for all compressors. LZ4 uses independent
+4 MB blocks (same as the LZ4 CLI). All compressors use MT compress and
+MT decompress where supported.
 
 | Compressor | Ratio | Compress | Decompress | Notes |
 |-----------|-------|----------|------------|-------|
-| LZ4       | 57.3% |    693 MB/s |  4,973 MB/s | compress 1T |
-| LZ4 HC 9  | 42.2% |     52 MB/s |  4,760 MB/s | compress 1T |
-| zstd 1    | 40.7% |  2,647 MB/s |  1,911 MB/s | decompress 1T |
-| zstd 3    | 35.4% |  1,227 MB/s |  1,630 MB/s | decompress 1T |
-| zstd 9    | 31.1% |    183 MB/s |  2,016 MB/s | decompress 1T |
-| zstd 19   | 26.9% |    4.8 MB/s |  1,825 MB/s | decompress 1T |
-| **SLZ L1**  | 58.6% |  **2,331 MB/s** | **28,571 MB/s** | |
-| **SLZ L3**  | 56.5% |     83 MB/s | **20,439 MB/s** | compress 1T |
-| **SLZ L5**  | 43.4% |     39 MB/s |  **9,404 MB/s** | compress 1T |
-| **SLZ L6**  | 31.4% |     37 MB/s |  **6,931 MB/s** | |
-| **SLZ L9**  | 27.4% |    6.6 MB/s |  2,101 MB/s | |
-| **SLZ L11** | 25.6% |    1.1 MB/s |  1,937 MB/s | |
+| LZ4 MT    | 57.3% |  4,687 MB/s | 25,510 MB/s | |
+| LZ4 HC 9 MT | 42.3% |    399 MB/s | 28,545 MB/s | |
+| zstd 1    | 40.7% |  3,284 MB/s |  2,047 MB/s | decompress 1T [<sup>†</sup>][zstd-1t] |
+| zstd 3    | 35.4% |  1,404 MB/s |  1,911 MB/s | decompress 1T [<sup>†</sup>][zstd-1t] |
+| zstd 9    | 31.1% |    261 MB/s |  1,968 MB/s | decompress 1T [<sup>†</sup>][zstd-1t] |
+| zstd 19   | 26.9% |    4.6 MB/s |  1,752 MB/s | decompress 1T [<sup>†</sup>][zstd-1t] |
+| **SLZ L1**  | 58.6% |  2,681 MB/s | **30,653 MB/s** | |
+| **SLZ L3**  | 56.5% |     83 MB/s | **20,904 MB/s** | compress 1T |
+| **SLZ L5**  | 43.4% |     39 MB/s | **10,524 MB/s** | compress 1T |
+| **SLZ L6**  | 31.4% |     41 MB/s |  **7,579 MB/s** | |
+| **SLZ L8**  | 31.0% |     20 MB/s |  **7,783 MB/s** | |
+| **SLZ L9**  | 27.4% |    6.8 MB/s |  2,127 MB/s | |
+| **SLZ L11** | 25.6% |    1.1 MB/s |  1,900 MB/s | |
 
-At comparable ratios: SLZ decompresses **3.4x faster** than zstd at
-the ~31% tier (L6 vs zstd 9) and **5.7x faster** than LZ4 at ~57%
-(L1 vs LZ4). SLZ L1 compress nearly matches zstd 1 while
-decompressing **15x faster**.
+At the ~31% ratio tier: SLZ L6 decompresses **3.9x faster** than
+zstd 9. At the ~57% tier: SLZ L1 decompresses **1.2x faster** than
+LZ4 MT while compressing to a slightly smaller size. Where SLZ truly
+dominates is against zstd: **15x faster decompress** at the fast tier
+(SLZ L1 vs zstd 1) because zstd cannot parallelize decompression.
+
+[zstd-1t]: https://github.com/facebook/zstd/issues/2470
+
+> **Why is zstd decompress single-threaded?** Yann Collet (zstd/LZ4
+> creator): *"[This is] due to a combination of being more difficult to
+> do, and less critical, since decompression is already plenty fast with
+> just a single thread (typically faster than SSD)."* — With PCIe 4.0 at
+> 7 GB/s and PCIe 5.0 at 12+ GB/s, that no longer holds. StreamLZ
+> decompresses in parallel at all levels.
 
 ### All levels (24 cores, enwik8)
 
