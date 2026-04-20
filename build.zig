@@ -81,11 +81,20 @@ pub fn build(b: *std.Build) void {
     // decode errors. Panics only on memory safety violations (which
     // ReleaseSafe catches). Feed with: afl-fuzz, honggfuzz, or manual
     // corpus via  `zig build fuzz && echo ... | ./zig-out/bin/fuzz-decompress`
-    const fuzz_module = b.createModule(.{
-        .root_source_file = b.path("src/fuzz_decompress.zig"),
+    const streamlz_module = b.createModule(.{
+        .root_source_file = b.path("src/streamlz.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .strip = strip,
+    });
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("scripts/fuzz_decompress.zig"),
+        .target = target,
+        .optimize = .ReleaseSafe,
+        .strip = strip,
+        .imports = &.{
+            .{ .name = "streamlz", .module = streamlz_module },
+        },
     });
     const fuzz_exe = b.addExecutable(.{
         .name = "fuzz-decompress",

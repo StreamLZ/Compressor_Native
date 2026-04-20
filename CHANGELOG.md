@@ -1,257 +1,42 @@
 # Changelog
 
-## [1.4.4]
+## [2.0.0] — 2026-04-20
 
-### Fixed
-- Fix memory growth in L9-L11 framed compression: reuse LzTemp (ThreadStatic)
-  and MLS (Reset instead of Create) across blocks. Previously each of ~125
-  blocks for enwik9 allocated ~100MB of match buffers that accumulated on
-  the LOH, driving working set from 6GB to 13GB+. Now stabilizes at ~6.5GB.
-- Pool BT4 tree arrays (head/left/right) via ArrayPool instead of fresh
-  allocation per block.
+Initial native (Zig) release. Full port of the C# StreamLZ library to
+Zig 0.15.2 with byte-exact wire-format compatibility.
 
-### Performance
-- Cap framed read size to 8MB for BT4 levels (L9-L11). Smaller blocks have
-  better cache locality for BT4 tree walks. No ratio impact (64MB sliding
-  window dictionary still provides full cross-block context).
-  - L11 enwik8 compress: 76.8s → 57.8s (+33%).
-- Warmup compress uses 128KB slice instead of full file. Eliminates the
-  10-minute warmup overhead on enwik9 L11.
-- GC.Collect between comparison benchmark levels to prevent cross-level
-  LOH accumulation.
+### Highlights
 
-## [1.4.3]
+- **All 11 compression levels** (Fast L1-L5, High L6-L11) with compress
+  and decompress at full parity with v1.
+- **Parallel decompress** at all levels: sidecar-based for L1-L5,
+  SC group-parallel for L6-L8, two-phase parallel for L9-L11.
+- **Dictionary support**: 7 built-in dictionaries (JSON, HTML, CSS, JS,
+  XML, text, general) with auto-detection by file extension. Custom
+  dictionary training via FASTCOVER algorithm. Zero-copy decompress
+  (no memmove overhead).
+- **128 MB dictionary window** for L11 (BT4 match finder).
+- **Flag-driven CLI** (no subcommands): compress, decompress, benchmark,
+  bench-all, decompress-bench, info, train, version.
+- **282 unit tests** + 140 fixture roundtrips against C# reference output.
+- **Fuzz harness** for decompressor safety testing.
+- Streaming decompress to `std.Io.Writer` with XXH32 content-checksum
+  verification.
 
-### Performance
-- Fast decoder generic specialization: eliminate isDelta branch from hot
-  loop via struct type parameter. The JIT generates separate native code
-  per literal mode, constant-folding the isDelta check.
-  - L1 enwik8 decomp: +4.2%, L5: +7.2%.
-- Fast decoder: move srcEnd from parameter to FastLzTable struct. Frees
-  a register in the short-token hot path, eliminating the rax spill that
-  cost 2 instructions per literal copy.
-  - L1 enwik8 decomp: +7.1%, L5: +4.3%.
-- Combined L1 decompress improvement (1.4.1–1.4.3): **+35%** (4,523 → 6,115 MB/s).
-- Combined L5 decompress improvement (1.4.1–1.4.3): **+14%** (4,376 → 4,995 MB/s).
+### Performance (Arrow Lake-S, 24 cores, enwik8 100 MB)
 
-## [1.4.2]
+- L1-L4 parallel decompress: 17-30 GB/s
+- L5 parallel decompress: 10-13 GB/s
+- L6-L8 SC group-parallel decompress: 15 GB/s
+- L9-L11 two-phase parallel decompress: 2 GB/s
+- L9 compress: 7.8 MB/s (SIMD hash probe + dual-bucket prefetch)
 
-### Performance
-- Remove redundant scratch buffer zeroing in all decompress paths.
-  - L11 enwik8 decomp: +31% (995 → 1,307 MB/s), L11 silesia: +15%.
-- Dual cache-line prefetch for match source in ExecuteTokens_Type1.
-  - L11 enwik8 decomp: +18% (1,307 → 1,541 MB/s).
-- Eliminate O(n) literal-length sum loop after ExecuteTokens_Type1.
-  - L11 enwik8 decomp: +7%, L8 enwik9: +6%, L8 silesia: +3%.
-- Combined L11 enwik8 decompress improvement: **+66%** (995 → 1,648 MB/s).
-- Fast decoder: defer per-token bounds check to dstSafeEnd region.
-  - L1 enwik8 decomp: +21% (4,523 → 5,480 MB/s).
-- Branchless left/right tree descent in BT4 match finder.
-  - L11 enwik8 compress: +3.5%, L8: +3.4%.
-- Widen hash-finder CountMatchingBytes from 4-byte to 8-byte XOR+TZCNT.
+### Key optimizations over v1
 
-### Added
-- `-db` CLI mode: decompress-only benchmark for profiling. Accepts SLZ1
-  framed files produced by `-c`, runs N decompress iterations with no
-  compression. Designed for dotnet-trace / VTune / PerfView.
-
-## [1.4.0]
-
-### Performance
-- SC chunk grouping: group 4 × 256KB chunks per thread in self-contained
-  parallel mode (L6-L8). The match finder sees 1MB of context instead of
-  256KB, dramatically improving compression ratio with no speed penalty on
-  homogeneous data.
-  - L6 enwik8: 33.7% → **31.4%** (-2.3pp ratio), compress unchanged, decompress +28%.
-  - L8 enwik8: 33.4% → **31.0%** (-2.4pp), compress unchanged, decompress +20%.
-  - L6 silesia: 28.2% → **26.7%** (-1.5pp), compress -14%, decompress -14%.
-  - L8 silesia: 27.9% → **26.3%** (-1.6pp), compress -4%, decompress -19%.
-
-### Changed
-- **Breaking**: Compressed output from L6-L8 now contains cross-chunk
-  references within each 4-chunk group. Older decompressors (< 1.4.0)
-  cannot decode data compressed with this version at L6-L8. Decompression
-  of data compressed by older versions is unaffected.
-
-## [1.3.0]
-
-### Performance
-- BT4 binary tree match finder for L8 and L11. Finds higher-quality
-  matches than hash chains by walking a sorted suffix tree.
-  - L8 (SC): -0.2pp ratio on silesia, +19% faster decompress (9.2 → 11.0 GB/s).
-  - L11: -1.7pp ratio on enwik8 (27.2% → 25.5%), compress ~4x slower.
-  - L6-L7 and L9-L10 unchanged (hash-based, BT4 tested but rejected).
-- Optimized BT4: pinned arrays, 8-byte XOR+TZCNT match extension,
-  prefetch for tree child nodes.
-
-## [1.2.1]
-
-### Fixed
-- Fix OOM in framed compressor when compressing small inputs. Buffer
-  allocation now capped to actual input size instead of scaling to
-  full thread count × memory budget. All 392 unit tests pass.
-
-## [1.2.0]
-
-### Performance
-- AVX2 vectorize delta literal copy in High decoder: +12% decompress
-  on mixed data (silesia L6: 10.7 GB/s → 11.9 GB/s on warm runs).
-- AVX2 vectorize raw literal copy and non-overlapping match copy in
-  High decoder (32 bytes per iteration, up from 8).
-- AVX2 vectorize delta literal encoding in compressor (SubtractBytes).
-- Updated benchmark tables in README with correct median precision.
-
-### Changed
-- **Breaking**: Reorder `maxDecompressedSize` before `CancellationToken`
-  on `DecompressStream`, `DecompressStreamAsync`, `DecompressFile`,
-  `DecompressFileAsync`, and `StreamLzFrameDecompressor.Decompress/Async`
-  to comply with CA1068 (CancellationToken must be last parameter).
-- All build warnings resolved (CS1573 missing XML param tags, CA1068,
-  CA1508).
-- CLI `-bc` comparison benchmark uses fast Span-based decompress path.
-- CLI benchmark median uses full-precision timing (was truncating to
-  integer milliseconds).
-
-## [1.1.0]
-
-### Fixed
-- Fix CLI `-b` benchmark crash on L9-L11 files larger than ~400MB.
-  The benchmark used the raw `Compress`/`Decompress` API, which on OOM
-  silently fell back to self-contained blocks, losing sliding window
-  context and producing incorrect ratios. The public framed APIs
-  (`CompressFile`, `DecompressFile`, `CompressFramed`) were never
-  affected. CLI now uses the framed API for correct results at all sizes.
-- Fix double-offset bug in new fast-path `DecompressFramed` that caused
-  crashes on multi-block framed data (second block onwards).
-
-### Performance
-- Add zero-copy fast-path for `DecompressFramed(ReadOnlySpan, Span)`:
-  parses frame/block headers in-place and calls the block decompressor
-  directly without MemoryStream or buffer copies. Restores full
-  benchmark speed for framed API consumers.
-- CLI `-b` and `-bc` benchmarks now use framed compress (correct sliding
-  window) with fast-path framed decompress (no allocation overhead).
-
-### Changed
-- CLI `-b` benchmark switched from raw to framed API. Compression ratios
-  for L9-L11 on large files are now correct (enwik9 L9: was 29.9%
-  incorrect, now 24.2% correct).
-- README: document threading model per level, add Parallel Compress /
-  Parallel Decompress columns to all benchmark tables, fix headline stats.
-
-## [1.0.9]
-
-### Fixed
-- Stream compressor now matches raw API speed and ratio. L9 stream
-  was 3x slower with 6% worse ratio due to 256KB read size (now uses
-  full window) and missing thread count (now uses all cores).
-- Memory-budget-based sizing: data per thread scales to fill 60% of
-  system RAM while keeping all cores busy. Handles files of any size
-  without manual tuning.
-- Frame decompressor supports blocks of any size (removed dead
-  large-block code path that broke cross-block dictionary references).
-- CLI `-d` decompress now handles L9+ sliding-window streams correctly.
-
-## [1.0.8]
-
-### Security
-- Bounds-check `ParseHeader` and `ParseChunkHeader` before any pointer
-  dereference. Truncated streams (e.g. incomplete network reads) no
-  longer cause blind reads past the source buffer.
-- Clamp self-contained prefix restoration to the actual chunk size,
-  preventing writes past a chunk's logical boundary.
-
-## [1.0.7]
-
-### Security
-- Fix silent failure in `ExecuteTokens_Type1`: corrupt match offsets
-  now abort decompression instead of returning uninitialized pool
-  memory in the output buffer.
-- Add `maxDecompressedSize` to `DecompressStream`, `DecompressFile`,
-  and async variants. Prevents multi-block decompression bombs that
-  expand without limit (the framed byte[] API already had this).
-
-## [1.0.6]
-
-### Added
-- `IProgress<long>` support on all stream and file APIs for progress
-  reporting. Reports bytes consumed (compress) or produced (decompress)
-  at block boundaries with zero hot-path overhead.
-- `CancellationToken` support on synchronous `CompressStream`,
-  `DecompressStream`, `CompressFile`, and `DecompressFile` methods
-  (async methods already had it).
-- Fuzz regression tests for known-bad inputs that previously crashed
-  the decoder.
-
-## [1.0.5]
-
-### Security
-- Fix process-killing crash when decompressing corrupt tANS-coded data.
-  Corrupt chunk headers in self-contained streams could produce source
-  pointers past the allocation, crashing the process via AccessViolation.
-- Harden tANS entropy decoder: mask LUT state indices, bounds-check
-  bitstream refill pointers, validate frequency table construction,
-  and prevent stack buffer overflows in table decode.
-- Fix integer overflow in High decoder scratch allocation
-  (OffsStreamSize * 4 could wrap int32).
-- Add decompression bomb protection: `DecompressFramed` now accepts
-  `maxDecompressedSize` (default 1 GB) to reject frames claiming
-  unreasonably large content sizes.
-
-### Added
-- Crash-resilient fuzz harness with file-based watermarking for
-  precise crash localization.
-- SECURITY.md: document safety guarantees and fuzz testing posture.
-
-### Testing
-- Fuzz-verified: 405 million mutations across L1/L5/L6/L9 and the
-  framed API with zero crashes. No performance regression on enwik8.
-
-## [1.0.4]
-
-### Performance
-- Remove sub-chunk pipelining in High decoder: serial path is 53% faster
-  for L6 (3.8 → 5.6 GB/s on enwik8, 3.7 → 8.8 GB/s on silesia).
-  Two-phase parallel decode for L9-11 retained (+37% benefit there).
-
-### Changed
-- Update package description and benchmark tables.
-
-## [1.0.3]
-
-### Security
-- Harden High decoder against malicious input: validate cumulative token
-  lengths in ResolveTokens, validate match offsets against buffer start
-  in both Type0 and Type1 execute paths, fix SafeSpace boundary check in
-  Type0 to account for total token footprint.
-
-## [1.0.2]
-
-### Security
-- Add missing bounds check on 32-bit long match path (cmd == 2) in Fast
-  decoder. The v1.0.1 fix covered short tokens and 16-bit long matches
-  but missed the 32-bit long match path.
-- Clamp pipelined scratch buffer size in TryDecodePipelined to prevent
-  out-of-bounds access if CalculateScratchSize exceeds the allocation.
-
-## [1.0.1]
-
-### Security
-- Harden Fast decoder against malicious input: bounds check in the short
-  token path prevents cascading writes past SafeSpace; validate 16-bit
-  match offsets against buffer start prevents out-of-bounds reads.
-
-### Fixed
-- Correct package description (6.0 GB/s decompress, was 5.6).
-- Downgrade System.IO.Hashing to 9.0.4 for stable net8.0 compatibility.
-
-### Changed
-- Rename internal identifiers for clarity (ByteHistogram, DeltaLiterals,
-  NearOffsets, FarOffsets, LiteralRunLengths, OverflowLengths).
-- Replace magic numbers with named constants in block headers and
-  sub-chunk type shifts.
-- Make FrameFlags enum internal (wire-format detail).
-
-## [1.0.0]
-
-Initial release.
+- CMOV LIFO swap in Fast short-token loop
+- Far-offset MOVDQU widening for medium/long match paths
+- Conditional far-offset prefetch for L3-L5
+- SIMD hash probe + dual-bucket prefetch for L9-L11 encoder
+- Parallel resolveTokens for L9-L11 (+17-24% decompress)
+- SC chunk grouping for L6-L8 (4x256KB groups)
+- v2 sidecar frame format for L1-L5 parallel decode

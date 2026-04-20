@@ -1,5 +1,5 @@
 const std = @import("std");
-const decoder = @import("decode/streamlz_decoder.zig");
+const slz = @import("streamlz");
 
 /// Fuzz harness for the StreamLZ decompressor.
 ///
@@ -28,5 +28,5 @@ pub fn main() !void {
     defer allocator.free(input);
 
     var dst: [1 << 24]u8 = undefined;
-    _ = decoder.decompressFramed(input, &dst) catch return;
+    _ = slz.decompressFramed(input, &dst) catch return;
 }

@@ -1,15 +1,15 @@
-bin/
-obj/
-*.user
-*.suo
-.vs/
-*.DotSettings.user
-assets/enwik8.txt
-.nuget-key
-publish.md
-b3.txt
-
 # Zig
-src/StreamLZ_zig/.zig-cache/
-src/StreamLZ_zig/zig-out/
-src/StreamLZ_zig/fixtures/
+.zig-cache/
+zig-out/
+fixtures/
+
+# Assets (large test files)
+assets/enwik8.txt
+assets/silesia_all.tar
+assets/zstd.exe
+
+# Secrets
+.nuget-key
+
+# Scratch
+b3.txt
