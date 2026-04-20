@@ -33,6 +33,262 @@ const high_framed = @import("high_framed.zig");
 
 const areAllBytesEqual = block_header.areAllBytesEqual;
 
+// ────────────────────────────────────────────────────────────
+//  Parallel SC Fast compress (L1)
+// ────────────────────────────────────────────────────────────
+
+const FastScShared = struct {
+    src: []const u8,
+    effective_src: []const u8,
+    level: u8,
+    sc_flag_bits: u8,
+    greedy_hash_bits: u6,
+    hasher_min_match_length: u32,
+    parser_config: fast_enc.ParserConfig,
+    check_plain_huffman: bool,
+    entropy_options: entropy_enc.EntropyOptions,
+    dict_len: usize,
+    tmp_bufs: []const []u8,
+    written: []usize,
+    next_chunk: std.atomic.Value(usize),
+    error_flag: std.atomic.Value(u32),
+    captured_err: std.atomic.Value(u16),
+    num_chunks: usize,
+};
+
+fn fastScWorkerFn(shared: *FastScShared) void {
+    var hasher = FastMatchHasher(u16).init(std.heap.c_allocator, .{
+        .hash_bits = shared.greedy_hash_bits,
+        .min_match_length = shared.hasher_min_match_length,
+    }) catch {
+        _ = shared.error_flag.store(1, .monotonic);
+        return;
+    };
+    defer hasher.deinit();
+
+    while (true) {
+        const chunk_idx = shared.next_chunk.fetchAdd(1, .monotonic);
+        if (chunk_idx >= shared.num_chunks) return;
+        if (shared.error_flag.load(.monotonic) != 0) return;
+
+        const src_off = shared.dict_len + chunk_idx * lz_constants.chunk_size;
+        const block_src_len = @min(shared.effective_src.len - src_off, lz_constants.chunk_size);
+        const block_src = shared.effective_src[src_off..][0..block_src_len];
+
+        hasher.reset();
+        if (shared.dict_len > 0) {
+            hasher.preloadDictionary(shared.effective_src.ptr, shared.dict_len);
+        }
+        const window_base_ptr: [*]const u8 = block_src.ptr;
+
+        var out = shared.tmp_bufs[chunk_idx];
+        var wpos: usize = 0;
+
+        const flags0: u8 = 0x05 | shared.sc_flag_bits | 0x40;
+        out[wpos] = flags0;
+        out[wpos + 1] = @intFromEnum(block_header.CodecType.fast);
+        wpos += 2;
+
+        if (areAllBytesEqual(block_src)) {
+            const memset_hdr: u32 = lz_constants.chunk_size_mask | (@as(u32, 1) << lz_constants.chunk_type_shift);
+            std.mem.writeInt(u32, out[wpos..][0..4], memset_hdr, .little);
+            wpos += 4;
+            out[wpos] = block_src[0];
+            wpos += 1;
+            shared.written[chunk_idx] = wpos;
+            continue;
+        }
+
+        const chunk_hdr_pos = wpos;
+        wpos += 4;
+        const chunk_payload_start = wpos;
+
+        const speed_tradeoff = cost_coeffs.speedTradeoffFor(
+            cost_coeffs.default_space_speed_tradeoff_bytes,
+            shared.level >= 5,
+        );
+        var total_cost: f32 = 0;
+        var sub_off: usize = 0;
+
+        while (sub_off < block_src_len) {
+            const round_bytes = @min(block_src_len - sub_off, fast_constants.sub_chunk_size);
+            const sub_src = shared.effective_src[src_off + sub_off ..][0..round_bytes];
+            const round_f: f32 = @floatFromInt(round_bytes);
+            const sub_memset_cost: f32 = (round_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) * speed_tradeoff + round_f + 3.0;
+
+            if (round_bytes >= 32) {
+                if (areAllBytesEqual(sub_src)) {
+                    out[wpos + 0] = @intCast((round_bytes >> 16) & 0xFF);
+                    out[wpos + 1] = @intCast((round_bytes >> 8) & 0xFF);
+                    out[wpos + 2] = @intCast(round_bytes & 0xFF);
+                    @memcpy(out[wpos + 3 ..][0..round_bytes], sub_src);
+                    wpos += round_bytes + 3;
+                    total_cost += @floatFromInt(round_bytes + 3);
+                    sub_off += round_bytes;
+                    continue;
+                }
+
+                const sub_hdr_pos = wpos;
+                wpos += 3;
+                const sub_payload_start = wpos;
+                const start_pos = src_off + sub_off;
+
+                const result = (switch (shared.level) {
+                    1 => fast_enc.encodeSubChunkRaw(-2, u16, std.heap.c_allocator, &hasher, sub_src, window_base_ptr, out[sub_payload_start..], start_pos, shared.parser_config),
+                    else => unreachable,
+                }) catch {
+                    _ = shared.error_flag.store(1, .monotonic);
+                    return;
+                };
+
+                const lz_cost: f32 = result.cost + 3.0;
+                const lz_wins = !result.bail and lz_cost < sub_memset_cost and result.bytes_written > 0 and result.bytes_written < round_bytes;
+
+                if (lz_wins) {
+                    const hdr: u32 = @as(u32, @intCast(result.bytes_written)) |
+                        (@as(u32, @intFromEnum(result.chunk_type)) << lz_constants.sub_chunk_type_shift) |
+                        lz_constants.chunk_header_compressed_flag;
+                    out[sub_hdr_pos + 0] = @intCast((hdr >> 16) & 0xFF);
+                    out[sub_hdr_pos + 1] = @intCast((hdr >> 8) & 0xFF);
+                    out[sub_hdr_pos + 2] = @intCast(hdr & 0xFF);
+                    wpos = sub_payload_start + result.bytes_written;
+                    total_cost += lz_cost;
+                } else {
+                    wpos = sub_hdr_pos;
+                    const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
+                    out[wpos + 0] = @intCast((hdr >> 16) & 0xFF);
+                    out[wpos + 1] = @intCast((hdr >> 8) & 0xFF);
+                    out[wpos + 2] = @intCast(hdr & 0xFF);
+                    @memcpy(out[wpos + 3 ..][0..round_bytes], sub_src);
+                    wpos += 3 + round_bytes;
+                    total_cost += sub_memset_cost;
+                }
+            } else {
+                const hdr: u32 = @as(u32, @intCast(round_bytes)) | lz_constants.chunk_header_compressed_flag;
+                out[wpos + 0] = @intCast((hdr >> 16) & 0xFF);
+                out[wpos + 1] = @intCast((hdr >> 8) & 0xFF);
+                out[wpos + 2] = @intCast(hdr & 0xFF);
+                @memcpy(out[wpos + 3 ..][0..round_bytes], sub_src);
+                wpos += 3 + round_bytes;
+                total_cost += sub_memset_cost;
+            }
+            sub_off += round_bytes;
+        }
+
+        const chunk_compressed_size = wpos - chunk_payload_start;
+        const block_f: f32 = @floatFromInt(block_src_len);
+        const block_memset_cost: f32 = (block_f * cost_coeffs.memset_per_byte + cost_coeffs.memset_base) * speed_tradeoff + block_f + 4.0;
+        if (chunk_compressed_size >= block_src_len or total_cost > block_memset_cost) {
+            wpos = 0;
+            const unc_flags0: u8 = 0x05 | 0x80 | shared.sc_flag_bits | 0x40;
+            out[wpos] = unc_flags0;
+            out[wpos + 1] = @intFromEnum(block_header.CodecType.fast);
+            wpos += 2;
+            @memcpy(out[wpos..][0..block_src_len], block_src);
+            wpos += block_src_len;
+        } else {
+            const raw: u32 = @as(u32, @intCast(chunk_compressed_size - 1));
+            std.mem.writeInt(u32, out[chunk_hdr_pos..][0..4], raw, .little);
+        }
+
+        shared.written[chunk_idx] = wpos;
+    }
+}
+
+fn compressFastChunksParallel(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    effective_src: []const u8,
+    dst_payload: []u8,
+    opts: Options,
+    sc_flag_bits: u8,
+    greedy_hash_bits: u6,
+    resolved: encoder.ResolvedParams,
+    parser_config: fast_enc.ParserConfig,
+    num_threads: u32,
+) CompressError!usize {
+    const dict_len = if (opts.dictionary) |d| d.len else 0;
+    const num_chunks = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+
+    const tmp_bufs = try allocator.alloc([]u8, num_chunks);
+    defer {
+        for (tmp_bufs) |b| if (b.len != 0) allocator.free(b);
+        allocator.free(tmp_bufs);
+    }
+    for (tmp_bufs) |*b| b.* = &[_]u8{};
+    for (tmp_bufs, 0..) |*b, i| {
+        const blk_off = i * lz_constants.chunk_size;
+        const blen = @min(src.len - blk_off, lz_constants.chunk_size);
+        b.* = try allocator.alloc(u8, compressBound(blen));
+    }
+
+    const written = try allocator.alloc(usize, num_chunks);
+    defer allocator.free(written);
+    @memset(written, 0);
+
+    var shared: FastScShared = .{
+        .src = src,
+        .effective_src = effective_src,
+        .level = opts.level,
+        .sc_flag_bits = sc_flag_bits,
+        .greedy_hash_bits = greedy_hash_bits,
+        .hasher_min_match_length = resolved.hasher_min_match_length,
+        .parser_config = parser_config,
+        .check_plain_huffman = false,
+        .entropy_options = entropyOptionsForLevel(opts.level),
+        .dict_len = dict_len,
+        .tmp_bufs = tmp_bufs,
+        .written = written,
+        .next_chunk = std.atomic.Value(usize).init(0),
+        .error_flag = std.atomic.Value(u32).init(0),
+        .captured_err = std.atomic.Value(u16).init(0),
+        .num_chunks = num_chunks,
+    };
+
+    const worker_count = @min(@as(usize, num_threads), num_chunks);
+    if (worker_count <= 1) {
+        fastScWorkerFn(&shared);
+    } else {
+        const threads = try allocator.alloc(std.Thread, worker_count);
+        defer allocator.free(threads);
+        var spawned: usize = 0;
+        while (spawned < worker_count) : (spawned += 1) {
+            threads[spawned] = std.Thread.spawn(.{}, fastScWorkerFn, .{&shared}) catch |err| {
+                for (threads[0..spawned]) |t| t.join();
+                return err;
+            };
+        }
+        for (threads) |t| t.join();
+    }
+
+    if (shared.error_flag.load(.monotonic) != 0) {
+        return error.DestinationTooSmall;
+    }
+
+    // Assemble chunk results + SC prefix table into dst_payload.
+    var dst_pos: usize = 0;
+    for (0..num_chunks) |i| {
+        const n = written[i];
+        if (dst_pos + n > dst_payload.len) return error.DestinationTooSmall;
+        @memcpy(dst_payload[dst_pos..][0..n], tmp_bufs[i][0..n]);
+        dst_pos += n;
+    }
+
+    // SC prefix table: (num_chunks - 1) * 8 bytes.
+    var i: usize = 1;
+    while (i < num_chunks) : (i += 1) {
+        const chunk_start = i * lz_constants.chunk_size;
+        if (chunk_start >= src.len) break;
+        const copy_size = @min(@as(usize, 8), src.len - chunk_start);
+        if (dst_pos + 8 > dst_payload.len) return error.DestinationTooSmall;
+        @memset(dst_payload[dst_pos..][0..8], 0);
+        @memcpy(dst_payload[dst_pos..][0..copy_size], src[chunk_start..][0..copy_size]);
+        dst_pos += 8;
+    }
+
+    return dst_pos;
+}
+
 /// Single-piece compress — builds one Fast-codec SLZ1 frame from
 /// `src` into `dst`.  For levels 6+, delegates to the High-codec
 /// frame builder.  The public `compressFramed` wrapper handles
@@ -203,13 +459,40 @@ pub fn compressFramedOne(
 
     const can_compress = src.len > fast_constants.min_source_length;
 
-    // Self-contained mode: each 256 KB block is independently decodable.
-    // CompressOneBlock and
-    // `AppendSelfContainedPrefixTable`. `two_phase` implies `self_contained`
-    //
-    const self_contained: bool = opts.self_contained or opts.two_phase;
+    const self_contained: bool = opts.self_contained or opts.two_phase or (opts.level == 1);
     const sc_flag_bit: u8 = if (self_contained) 0x10 else 0;
     const two_phase_flag_bit: u8 = if (opts.two_phase) 0x20 else 0;
+
+    const num_chunks: usize = if (can_compress) (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size else 0;
+    const effective_threads: u32 = if (opts.num_threads == 0) @intCast(@max(1, std.Thread.getCpuCount() catch 1)) else opts.num_threads;
+    if (self_contained and can_compress and effective_threads > 1 and num_chunks > 1) {
+        const parallel_payload_size = try compressFastChunksParallel(
+            allocator,
+            src,
+            effective_src,
+            dst[frame_block_start..],
+            opts,
+            sc_flag_bit | two_phase_flag_bit,
+            greedy_hash_bits,
+            resolved,
+            parser_config,
+            effective_threads,
+        );
+
+        frame.writeBlockHeader(dst[frame_block_hdr_pos..], .{
+            .compressed_size = @intCast(parallel_payload_size),
+            .decompressed_size = @intCast(src.len),
+            .uncompressed = false,
+            .parallel_decode_metadata = false,
+        });
+        pos = frame_block_start + parallel_payload_size;
+
+        // End mark.
+        if (pos + 4 > dst.len) return error.DestinationTooSmall;
+        frame.writeEndMark(dst[pos..]);
+        pos += 4;
+        return pos;
+    }
 
     // CompressBlocksSerial -> CompressOneBlock -> CompressChunk.
     // Structure:
@@ -450,7 +733,6 @@ pub fn compressFramedOne(
     // The parallel decompressor uses these to restore the corrupted first
     // 8 bytes of each per-worker-decoded chunk.
     if (self_contained and can_compress) {
-        const num_chunks: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
         var i: usize = 1;
         while (i < num_chunks) : (i += 1) {
             const chunk_start = i * lz_constants.chunk_size;

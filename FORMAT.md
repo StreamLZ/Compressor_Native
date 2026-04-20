@@ -435,9 +435,21 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 
 ## Parallel Decode Strategy Summary
 
+### Decode
+
 | Levels | Codec | Strategy | Mechanism |
 |--------|-------|----------|-----------|
-| L1-L4  | Fast  | Sidecar parallel | Small sidecar (~0.15% overhead) carries cross-chunk match ops + literal leaves. Workers decode contiguous slices independently. |
+| L1     | Fast  | SC group-parallel | Encoder emits self-contained chunks. Each chunk decoded independently, no sidecar needed. Compress is also parallel (per-chunk workers). |
+| L2-L4  | Fast  | Sidecar parallel | Small sidecar (~0.15% overhead) carries cross-chunk match ops + literal leaves. Workers decode contiguous slices independently. |
 | L5     | Fast  | Sidecar parallel | Larger sidecar (~1.2% overhead) with cross-chunk source bytes at transitive depth >= 1. Workers constrained to 16-chunk slice boundaries. |
 | L6-L8  | High  | SC group-parallel | Encoder constrains chunks to self-contained groups (4 chunks / 1 MB). Each group decoded independently, no sidecar needed. |
 | L9-L11 | High  | Two-phase parallel | Phase 1: parallel entropy decode + token resolution. Phase 2: serial token execution. No sidecar (64 MB dictionary window makes cross-slice deps ubiquitous). |
+
+### Compress
+
+| Levels | Codec | Threading |
+|--------|-------|-----------|
+| L1     | Fast  | Parallel (per-chunk workers, SC mode) |
+| L2-L5  | Fast  | Serial |
+| L6-L8  | High  | Parallel (per-group workers, SC mode) |
+| L9-L11 | High  | Parallel (per-block workers, sliding window) |

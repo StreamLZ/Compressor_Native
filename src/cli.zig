@@ -520,7 +520,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     defer allocator.free(decompressed);
 
     // Warm-up compress.
-    const comp_opts: encoder.Options = .{ .level = level, .dictionary = dict_data_b, .dictionary_id = dict_id_b };
+    const comp_opts: encoder.Options = .{ .level = level, .dictionary = dict_data_b, .dictionary_id = dict_id_b, .num_threads = args.threads };
     var comp_size: usize = try encoder.compressFramed(allocator, src, compressed, comp_opts);
 
     // Compress benchmark.

@@ -73,8 +73,9 @@ Intel Core Ultra 9 285K (Arrow Lake-S), 24 cores, Windows 11.
 | L10 | 28,253,307 | 28.3% |   7.6 MB/s |  2,187 MB/s |
 | L11 | 26,850,856 | 26.9% |   1.2 MB/s |  2,033 MB/s |
 
-All decompress numbers use parallel dispatch (24 cores). Compress is
-serial for L1-L5 (Fast codec) and parallel for L6-L11 (High codec).
+All decompress numbers use parallel dispatch (24 cores). L1 compress
+is parallel (SC mode); L2-L5 compress is serial; L6-L11 compress is
+parallel (High codec).
 
 ---
 

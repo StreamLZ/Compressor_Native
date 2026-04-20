@@ -96,16 +96,28 @@ independently.
 
 ---
 
-## Parallel decode architecture
+## Parallel architecture
+
+### Decode
 
 | Levels | Strategy | How it works |
 |--------|----------|--------------|
-| L1-L4 | Sidecar (small) | Per-block BFS closure sidecar (~150 KB/100 MB). Workers decode contiguous slices independently. |
+| L1 | SC group-parallel | Encoder emits SC chunks. Each chunk decoded independently, no sidecar. |
+| L2-L4 | Sidecar (small) | Per-block BFS closure sidecar (~150 KB/100 MB). Workers decode contiguous slices independently. |
 | L5 | Sidecar (large) | Per-block sidecar (~1.2 MB/100 MB) with cross-chunk source bytes at depth ≥ 1. |
 | L6-L8 | SC group-parallel | Encoder constrains chunks to self-contained 4-chunk groups. Each group decoded independently. |
 | L9-L11 | Two-phase | Phase 1: parallel entropy decode + resolveTokens. Phase 2: serial token execution. |
 
-All paths share a persistent `std.Thread.Pool` to avoid per-call thread spawn cost.
+### Compress
+
+| Levels | Threading | How it works |
+|--------|-----------|--------------|
+| L1 | Parallel | Per-chunk workers with independent hashers (SC mode). |
+| L2-L5 | Serial | Single-threaded greedy/lazy parser. |
+| L6-L8 | Parallel | Per-group workers with independent match finders (SC mode). |
+| L9-L11 | Parallel | Per-block workers sharing pre-computed MLS. |
+
+All decode paths share a persistent `std.Thread.Pool` to avoid per-call thread spawn cost.
 
 ---
 
