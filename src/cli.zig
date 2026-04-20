@@ -493,6 +493,49 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
     const src = readFile(allocator, in_path, w);
     defer allocator.free(src);
 
+    // zstd/lz4 decompress: compress first (to produce blocks), then decompress.
+    if (args.engine != .slz) {
+        const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
+        const level: c_int = @intCast(args.level);
+
+        switch (args.engine) {
+            .zstd_engine => {
+                var result = zstd.compressBlocksMt(allocator, src, threads, level) catch |err| {
+                    try w.print("error: zstd compress failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+                defer result.deinit();
+                const dec_buf = try allocator.alloc(u8, src.len);
+                defer allocator.free(dec_buf);
+                zstd.decompressBlocksMt(allocator, src, dec_buf, &result, threads) catch |err| {
+                    try w.print("error: zstd decompress failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+                try w.print("decompressed {d} bytes  zstd {d} MT\n", .{ src.len, level });
+            },
+            .lz4_engine => {
+                const hc_level: ?c_int = if (level > 1) level else null;
+                var result = lz4.compressMt(allocator, src, threads, hc_level) catch |err| {
+                    try w.print("error: lz4 compress failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+                defer result.deinit();
+                const dec_buf = try allocator.alloc(u8, src.len);
+                defer allocator.free(dec_buf);
+                lz4.decompressMt(allocator, src, dec_buf, &result, threads) catch |err| {
+                    try w.print("error: lz4 decompress failed: {s}\n", .{@errorName(err)});
+                    std.process.exit(1);
+                };
+                try w.print("decompressed {d} bytes  LZ4{s} MT\n", .{
+                    src.len,
+                    if (hc_level != null) " HC" else "",
+                });
+            },
+            .slz => unreachable,
+        }
+        return;
+    }
+
     const hdr = frame.parseHeader(src) catch |err| {
         try w.print("error: not a valid SLZ1 frame: {s}\n", .{@errorName(err)});
         try w.flush();

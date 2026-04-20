@@ -37,6 +37,8 @@ const areAllBytesEqual = block_header.areAllBytesEqual;
 //  Parallel SC Fast compress (L1)
 // ────────────────────────────────────────────────────────────
 
+const l1_sc_group_size: usize = 1; // per-chunk independence (256 KB)
+
 const FastScShared = struct {
     src: []const u8,
     effective_src: []const u8,
@@ -50,10 +52,11 @@ const FastScShared = struct {
     dict_len: usize,
     tmp_bufs: []const []u8,
     written: []usize,
-    next_chunk: std.atomic.Value(usize),
+    next_group: std.atomic.Value(usize),
     error_flag: std.atomic.Value(u32),
     captured_err: std.atomic.Value(u16),
     num_chunks: usize,
+    num_groups: usize,
 };
 
 fn fastScWorkerFn(shared: *FastScShared) void {
@@ -67,19 +70,30 @@ fn fastScWorkerFn(shared: *FastScShared) void {
     defer hasher.deinit();
 
     while (true) {
-        const chunk_idx = shared.next_chunk.fetchAdd(1, .monotonic);
-        if (chunk_idx >= shared.num_chunks) return;
+        const group_idx = shared.next_group.fetchAdd(1, .monotonic);
+        if (group_idx >= shared.num_groups) return;
         if (shared.error_flag.load(.monotonic) != 0) return;
 
-        const src_off = shared.dict_len + chunk_idx * lz_constants.chunk_size;
-        const block_src_len = @min(shared.effective_src.len - src_off, lz_constants.chunk_size);
-        const block_src = shared.effective_src[src_off..][0..block_src_len];
+        const first_chunk = group_idx * l1_sc_group_size;
+        const last_chunk = @min(first_chunk + l1_sc_group_size, shared.num_chunks);
 
+        // Reset hasher once per group — persists across chunks within the
+        // group so the parser can find matches across the full 4 MB window.
         hasher.reset();
         if (shared.dict_len > 0) {
             hasher.preloadDictionary(shared.effective_src.ptr, shared.dict_len);
         }
-        const window_base_ptr: [*]const u8 = block_src.ptr;
+
+        // Window base spans the entire group so cross-chunk matches work.
+        const group_start_off = shared.dict_len + first_chunk * lz_constants.chunk_size;
+        const window_base_ptr: [*]const u8 = shared.effective_src.ptr + group_start_off;
+
+        var ci: usize = first_chunk;
+        while (ci < last_chunk) : (ci += 1) {
+        const chunk_idx = ci;
+        const src_off = shared.dict_len + chunk_idx * lz_constants.chunk_size;
+        const block_src_len = @min(shared.effective_src.len - src_off, lz_constants.chunk_size);
+        const block_src = shared.effective_src[src_off..][0..block_src_len];
 
         var out = shared.tmp_bufs[chunk_idx];
         var wpos: usize = 0;
@@ -192,6 +206,7 @@ fn fastScWorkerFn(shared: *FastScShared) void {
         }
 
         shared.written[chunk_idx] = wpos;
+        } // end while (ci < last_chunk)
     }
 }
 
@@ -226,6 +241,8 @@ fn compressFastChunksParallel(
     defer allocator.free(written);
     @memset(written, 0);
 
+    const num_groups = (num_chunks + l1_sc_group_size - 1) / l1_sc_group_size;
+
     var shared: FastScShared = .{
         .src = src,
         .effective_src = effective_src,
@@ -239,13 +256,14 @@ fn compressFastChunksParallel(
         .dict_len = dict_len,
         .tmp_bufs = tmp_bufs,
         .written = written,
-        .next_chunk = std.atomic.Value(usize).init(0),
+        .next_group = std.atomic.Value(usize).init(0),
         .error_flag = std.atomic.Value(u32).init(0),
         .captured_err = std.atomic.Value(u16).init(0),
         .num_chunks = num_chunks,
+        .num_groups = num_groups,
     };
 
-    const worker_count = @min(@as(usize, num_threads), num_chunks);
+    const worker_count = @min(@as(usize, num_threads), num_groups);
     if (worker_count <= 1) {
         fastScWorkerFn(&shared);
     } else {
@@ -322,10 +340,12 @@ pub fn compressFramedOne(
         else => unreachable,
     };
     var pos: usize = 0;
+    const sc_grp: u8 = lz_constants.default_sc_group_size;
     const hdr_len = try frame.writeHeader(dst, .{
         .codec = .fast,
         .level = codec_level,
         .block_size = opts.block_size,
+        .sc_group_size = sc_grp,
         .content_size = if (opts.include_content_size) @as(u64, @intCast(src.len)) else null,
         .dictionary_id = opts.dictionary_id,
     });
