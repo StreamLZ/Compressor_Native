@@ -21,6 +21,95 @@ improves compress speed.
 
 ---
 
+## L1 greedy parser branch misprediction investigation (2026-04-20)
+
+**Context**: VTune uarch-exploration on L1 parallel compress (8T, enwik9
+1 GB) showed `runGreedyParser` at 74.9B instructions / 30.5B cycles with
+**61.2B branch mispredict slots** — the dominant bottleneck. Per-thread
+throughput was ~350 MB/s vs LZ4's ~700 MB/s.
+
+**VTune hotspot breakdown** (by cycles):
+
+| Function | Cycles | Mispredict slots |
+|----------|--------|-----------------|
+| runGreedyParser | 30.5B | 61.2B |
+| extendMatchForward | 10.0B | 25.4B |
+| copyBlocks | 5.1B | 0.2B |
+| writeComplexOffset | 4.1B | 21.8B |
+| writeOffset | 3.4B | 23.5B |
+
+**Root cause**: The greedy parser has a multi-way data-dependent decision
+tree per position: (1) recent-offset match? (2) hash match with bounds
+check + byte confirm + min_length check? (3) offset-8 fallback? (4) no
+match → skip. That's 5-7 branches per position on the miss path. The CPU
+branch predictor cannot learn these patterns because they depend on the
+input data's match distribution. LZ4's parser has ~2 branches per
+position (one hash lookup + one byte compare).
+
+### Experiments tried
+
+**1. Widen extendMatchForward from 4-byte to 8-byte comparisons**
+
+Result: **+4% compress speed**, ratio +0.001%. Halves loop iterations in
+the match extension, reducing exit-branch mispredicts. **Committed.**
+
+**2. Remove offset-8 fallback for L1 (`comptime level >= -1` gate)**
+
+Result: +1% speed, **-0.03% ratio** (+15 KB on 100 MB). The offset-8
+branch is well-predicted (almost always not-taken) so removing it
+doesn't help. But it finds real matches, so removing it hurts ratio.
+Reverted.
+
+**3. `noinline` writeOffset to shrink hot loop icache footprint**
+
+Result: No measurable change. The loop body already fits in the DSB
+(~4K µops). Making `writeOffset` a call doesn't change the branch
+prediction behavior.
+
+**4. Hash-first restructured parser (eliminate `found_match` flag)**
+
+Rewrite the L1 path to evaluate hash and recent speculatively, then
+use a single `if (hash_confirmed or recent_confirmed)` branch instead
+of the nested if/else chain.
+
+Result: Speed unchanged (2,780 vs 2,785 MB/s), **ratio -0.77%**
+(+452 KB on 100 MB). The restructure lost the original path's 1-byte-
+literal trick for recent-offset matches (`source_cursor += 1` before
+extending). That trick finds overlapping matches that the hash-first
+path misses, saving significant bytes. And the combined OR branch
+still mispredicts at the same rate — the CPU sees the same data-
+dependent pattern regardless of code structure.
+
+### Why StreamLZ L1 is inherently slower than LZ4 per-thread
+
+The StreamLZ Fast wire format requires:
+- **Recent-offset tracking** — an extra speculative read + comparison
+  per position that LZ4 doesn't have
+- **Minimum match length table** — offset-dependent threshold (near
+  offsets: 4 bytes, far offsets: longer) adds a branch after match
+  confirmation
+- **Offset-8 fallback** — exploits the 8-byte initial copy at chunk
+  boundaries; LZ4 has no equivalent
+
+These features are what give StreamLZ better ratio than LZ4 at the
+same level (58.6% vs 57.3% on enwik8) and dramatically faster
+decompress (the decoder benefits from recent-offset tokens being
+free to decode). The per-thread compress cost is the tradeoff.
+
+### Where the speedup actually lives
+
+L1 compress scales via parallelism (SC mode, per-chunk workers):
+- 1 thread: ~350 MB/s
+- 8 threads: 2,800 MB/s
+- 24 threads: 4,800 MB/s
+
+This matches zstd 1's 8-thread compress speed (3,300 MB/s) while
+decompressing 15x faster. The architectural choice is: accept lower
+per-thread compress throughput in exchange for a decode-optimized wire
+format that parallelizes trivially.
+
+---
+
 ## Zig L9 decompress micro-optimizations (2026-04-14)
 
 After the big wins (`c_allocator` for token fallback, register-resident
