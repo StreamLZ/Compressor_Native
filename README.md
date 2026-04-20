@@ -85,7 +85,7 @@ LZ4 MT while compressing to a slightly smaller size. Where SLZ truly
 dominates is against zstd: **15x faster decompress** at the fast tier
 (SLZ L1 vs zstd 1) because zstd cannot parallelize decompression.
 
-[zstd-1t]: https://github.com/facebook/zstd/issues/2470
+[zstd-1t]: https://github.com/facebook/zstd/issues/2470#issuecomment-759613384
 
 > **Why is zstd decompress single-threaded?** Yann Collet (zstd/LZ4
 > creator): *"[This is] due to a combination of being more difficult to
