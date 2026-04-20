@@ -45,6 +45,7 @@ pub fn build(b: *std.Build) void {
     // decoder's per-chunk token-array fallback (matches C#'s
     // NativeMemory.Alloc, ~100x faster than page_allocator).
     exe.linkLibC();
+    addVendorLibs(b, exe);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -72,6 +73,7 @@ pub fn build(b: *std.Build) void {
         .root_module = safe_module,
     });
     safe_exe.linkLibC();
+    addVendorLibs(b, safe_exe);
     const safe_install = b.addInstallArtifact(safe_exe, .{});
     const safe_step = b.step("safe", "Build with ReleaseSafe (bounds + overflow checks)");
     safe_step.dependOn(&safe_install.step);
@@ -104,4 +106,47 @@ pub fn build(b: *std.Build) void {
     const fuzz_install = b.addInstallArtifact(fuzz_exe, .{});
     const fuzz_step = b.step("fuzz", "Build fuzz_decompress harness (ReleaseSafe)");
     fuzz_step.dependOn(&fuzz_install.step);
+}
+
+fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    const c_flags = &.{ "-DXXH_NAMESPACE=ZSTD_", "-DZSTD_DISABLE_ASM", "-DZSTD_MULTITHREAD" };
+
+    // ---- zstd (v1.5.7) ----
+    exe.addIncludePath(b.path("vendor/zstd"));
+    exe.addIncludePath(b.path("vendor/zstd/common"));
+    exe.addCSourceFiles(.{ .files = &.{
+        "vendor/zstd/common/debug.c",
+        "vendor/zstd/common/entropy_common.c",
+        "vendor/zstd/common/error_private.c",
+        "vendor/zstd/common/fse_decompress.c",
+        "vendor/zstd/common/pool.c",
+        "vendor/zstd/common/threading.c",
+        "vendor/zstd/common/xxhash.c",
+        "vendor/zstd/common/zstd_common.c",
+        "vendor/zstd/compress/fse_compress.c",
+        "vendor/zstd/compress/hist.c",
+        "vendor/zstd/compress/huf_compress.c",
+        "vendor/zstd/compress/zstd_compress.c",
+        "vendor/zstd/compress/zstd_compress_literals.c",
+        "vendor/zstd/compress/zstd_compress_sequences.c",
+        "vendor/zstd/compress/zstd_compress_superblock.c",
+        "vendor/zstd/compress/zstd_double_fast.c",
+        "vendor/zstd/compress/zstd_fast.c",
+        "vendor/zstd/compress/zstd_lazy.c",
+        "vendor/zstd/compress/zstd_ldm.c",
+        "vendor/zstd/compress/zstd_opt.c",
+        "vendor/zstd/compress/zstd_preSplit.c",
+        "vendor/zstd/compress/zstdmt_compress.c",
+        "vendor/zstd/decompress/huf_decompress.c",
+        "vendor/zstd/decompress/zstd_ddict.c",
+        "vendor/zstd/decompress/zstd_decompress.c",
+        "vendor/zstd/decompress/zstd_decompress_block.c",
+    }, .flags = c_flags });
+
+    // ---- LZ4 (v1.10.0) ----
+    exe.addIncludePath(b.path("vendor/lz4"));
+    exe.addCSourceFiles(.{ .files = &.{
+        "vendor/lz4/lz4.c",
+        "vendor/lz4/lz4hc.c",
+    }, .flags = &.{} });
 }
