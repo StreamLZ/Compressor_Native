@@ -36,7 +36,11 @@ const Args = struct {
     output: ?[]const u8,
     dict_name: ?[]const u8 = null, // -D name or path
     no_dict: bool = false, // --no-dict disables auto-detection
+    report_mem: bool = false, // -mem: print peak commit at exit
+    engine: Engine = .slz, // --zstd or --lz4 to use external compressor
 };
+
+const Engine = enum { slz, zstd_engine, lz4_engine };
 
 fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
     var result: Args = .{
@@ -132,6 +136,18 @@ fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
             result.no_dict = true;
             continue;
         }
+        if (eql(arg, "-mem")) {
+            result.report_mem = true;
+            continue;
+        }
+        if (eql(arg, "--zstd")) {
+            result.engine = .zstd_engine;
+            continue;
+        }
+        if (eql(arg, "--lz4")) {
+            result.engine = .lz4_engine;
+            continue;
+        }
         // Starts with '-' but not recognized
         if (arg.len > 0 and arg[0] == '-') {
             w.print("error: unknown flag '{s}'\n\n", .{arg}) catch {};
@@ -205,6 +221,11 @@ pub fn run() !void {
         .bench_compare => try runBenchCompare(allocator, w, args),
         .info => try runInfo(allocator, w, args),
         .train => try runTrain(allocator, w, args),
+    }
+
+    if (args.report_mem) {
+        const mem = getMemInfo();
+        try w.print("MEMORY: {d:.0} MB peak commit\n", .{mem.commit_mb});
     }
 }
 
@@ -346,7 +367,7 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
     const in_path = requireInput(args, w);
     const level = args.level;
 
-    if (level < 1 or level > 11) {
+    if (args.engine == .slz and (level < 1 or level > 11)) {
         try w.print("error: level must be 1..11 (got {d})\n", .{level});
         try w.flush();
         std.process.exit(2);
@@ -392,9 +413,52 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         }
     }
 
-    const written = encoder.compressFramed(allocator, src, dst, .{
+    // Dispatch to the selected engine.
+    const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
+    var written: usize = 0;
+
+    switch (args.engine) {
+        .zstd_engine => {
+            var result = zstd.compressBlocksMt(allocator, src, threads, @intCast(level)) catch |err| {
+                try w.print("error: zstd compression failed: {s}\n", .{@errorName(err)});
+                try w.flush();
+                std.process.exit(1);
+            };
+            defer result.deinit();
+            written = result.total_compressed;
+            try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  zstd {d} MT  ({s})\n", .{
+                src.len,
+                written,
+                @as(f64, @floatFromInt(written)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
+                level,
+                in_path,
+            });
+            return;
+        },
+        .lz4_engine => {
+            const hc_level: ?c_int = if (level > 1) @intCast(level) else null;
+            var result = lz4.compressMt(allocator, src, threads, hc_level) catch |err| {
+                try w.print("error: lz4 compression failed: {s}\n", .{@errorName(err)});
+                try w.flush();
+                std.process.exit(1);
+            };
+            defer result.deinit();
+            written = result.total_compressed;
+            try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  LZ4{s} MT  ({s})\n", .{
+                src.len,
+                written,
+                @as(f64, @floatFromInt(written)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
+                if (hc_level != null) " HC" else "",
+                in_path,
+            });
+            return;
+        },
+        .slz => {},
+    }
+
+    written = encoder.compressFramed(allocator, src, dst, .{
         .level = level,
-        .num_threads = args.threads,
+        .num_threads = @intCast(threads),
         .dictionary = dict_data,
         .dictionary_id = dict_id,
     }) catch |err| {
@@ -597,6 +661,39 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
         try w.flush();
         std.process.exit(1);
     }
+
+}
+
+const MemInfo = struct { peak_rss_mb: f64, commit_mb: f64 };
+
+fn getMemInfo() MemInfo {
+    const PROCESS_MEMORY_COUNTERS = extern struct {
+        cb: u32 = @sizeOf(@This()),
+        PageFaultCount: u32 = 0,
+        PeakWorkingSetSize: usize = 0,
+        WorkingSetSize: usize = 0,
+        QuotaPeakPagedPoolUsage: usize = 0,
+        QuotaPagedPoolUsage: usize = 0,
+        QuotaPeakNonPagedPoolUsage: usize = 0,
+        QuotaNonPagedPoolUsage: usize = 0,
+        PagefileUsage: usize = 0,
+        PeakPagefileUsage: usize = 0,
+    };
+    const k32 = struct {
+        extern "kernel32" fn K32GetProcessMemoryInfo(
+            hProcess: std.os.windows.HANDLE,
+            ppsmemCounters: *PROCESS_MEMORY_COUNTERS,
+            cb: u32,
+        ) callconv(.winapi) std.os.windows.BOOL;
+    };
+    var info: PROCESS_MEMORY_COUNTERS = .{};
+    if (k32.K32GetProcessMemoryInfo(std.os.windows.GetCurrentProcess(), &info, @sizeOf(PROCESS_MEMORY_COUNTERS)) != 0) {
+        return .{
+            .peak_rss_mb = @as(f64, @floatFromInt(info.PeakWorkingSetSize)) / (1024.0 * 1024.0),
+            .commit_mb = @as(f64, @floatFromInt(info.PeakPagefileUsage)) / (1024.0 * 1024.0),
+        };
+    }
+    return .{ .peak_rss_mb = 0, .commit_mb = 0 };
 }
 
 // ─── Benchmark: decompress only (-db) ────────────────────────────────
