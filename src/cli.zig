@@ -14,6 +14,8 @@ const trainer = @import("dict/trainer.zig");
 const zstd = @import("compare/zstd.zig");
 const lz4 = @import("compare/lz4.zig");
 
+const forward_lz = @import("encode/forward_lz.zig");
+
 const Mode = enum {
     compress,
     decompress,
@@ -22,6 +24,7 @@ const Mode = enum {
     bench_all,
     bench_compare,
     bench_compare_fast,
+    forward_analyze,
     train,
     info,
     version,
@@ -104,6 +107,10 @@ fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
         }
         if (eql(arg, "--train")) {
             result.mode = .train;
+            continue;
+        }
+        if (eql(arg, "--forward")) {
+            result.mode = .forward_analyze;
             continue;
         }
         if (eql(arg, "-l")) {
@@ -224,6 +231,7 @@ pub fn run() !void {
         .bench_all => try runBenchAll(allocator, w, args),
         .bench_compare => try runBenchCompare(allocator, w, args, false),
         .bench_compare_fast => try runBenchCompare(allocator, w, args, true),
+        .forward_analyze => try runForwardAnalyze(allocator, w, args),
         .info => try runInfo(allocator, w, args),
         .train => try runTrain(allocator, w, args),
     }
@@ -1316,6 +1324,57 @@ fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
 }
 
 // ─── Train ─────────────────────────────────────────────────────────
+
+// ─── Forward-LZ analysis ────────────────────────────────────────────
+
+fn runForwardAnalyze(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+    const in_path = requireInput(args, w);
+    const src = readFile(allocator, in_path, w);
+    defer allocator.free(src);
+
+    const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
+    try w.print("Forward-LZ analysis: {s} ({d} bytes, {d:.2} MB)\n\n", .{ in_path, src.len, mb });
+    try w.flush();
+
+    var timer = try std.time.Timer.start();
+    const result = forward_lz.analyzeForwardLz(allocator, src) catch |err| {
+        try w.print("error: forward-LZ analysis failed: {s}\n", .{@errorName(err)});
+        return;
+    };
+    const elapsed_ns = timer.read();
+    const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
+
+    const ratio = @as(f64, @floatFromInt(result.total_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+
+    try w.print("Encode time: {d:.1} ms\n\n", .{elapsed_ms});
+    try w.print("Compressed: {d:>12} bytes ({d:.1}%)\n", .{ result.total_size, ratio });
+    try w.print("  patterns:   {d:>12} bytes (tANS)\n", .{result.pattern_stream_size});
+    try w.print("  positions:  {d:>12} bytes (tANS)\n", .{result.position_stream_size});
+    try w.print("  literals:   {d:>12} bytes (tANS)\n", .{result.literal_stream_size});
+    try w.print("  lit_pos:    {d:>12} bytes (tANS)\n", .{result.literal_pos_stream_size});
+    try w.print("  control:    {d:>12} bytes (tANS)\n", .{result.control_stream_size});
+    try w.print("\n", .{});
+    try w.print("Forward refs: {d:>12} (patterns appearing 2+ times)\n", .{result.num_forward_refs});
+    try w.print("Singletons:   {d:>12} (unique matches)\n", .{result.num_singletons});
+    try w.print("Scatter writes:{d:>11} (total dest positions)\n", .{result.num_scatter_writes});
+    try w.print("Literals:     {d:>12} (uncovered bytes)\n", .{result.num_literals});
+
+    // Compare to StreamLZ L1
+    const bound = encoder.compressBound(src.len);
+    const comp_buf = try allocator.alloc(u8, bound);
+    defer allocator.free(comp_buf);
+    const slz_size = encoder.compressFramed(allocator, src, comp_buf, .{ .level = 1 }) catch 0;
+    if (slz_size > 0) {
+        const slz_ratio = @as(f64, @floatFromInt(slz_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+        try w.print("\nStreamLZ L1: {d:>12} bytes ({d:.1}%)\n", .{ slz_size, slz_ratio });
+        try w.print("Forward-LZ:  {d:>12} bytes ({d:.1}%)\n", .{ result.total_size, ratio });
+        if (result.total_size < slz_size) {
+            try w.print("Forward wins by {d} bytes\n", .{slz_size - result.total_size});
+        } else {
+            try w.print("Backward wins by {d} bytes\n", .{result.total_size - slz_size});
+        }
+    }
+}
 
 fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
