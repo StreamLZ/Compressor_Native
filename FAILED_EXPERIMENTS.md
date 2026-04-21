@@ -21,6 +21,57 @@ improves compress speed.
 
 ---
 
+## High-bit stripping for ASCII literal streams (2026-04-21)
+
+**Hypothesis**: In ASCII text, 99.33% of bytes have high bit = 0.
+Stripping the high bit and encoding 7-bit values through tANS (128-
+symbol alphabet instead of 256) should compress tighter. The rare
+exceptions (0.67% of bytes with high bit = 1) are stored as a small
+delta-varint exception stream.
+
+Theoretical savings: the high bit has only 0.058 bits/byte of entropy
+vs the 1 bit/byte it costs in a fixed-width encoding. Should save
+~11.9 MB on 100 MB of text.
+
+**What we tried**: Pre-filter approach — strip high bits from enwik8,
+compress the 7-bit stream + exception stream separately, compare
+total compressed size against compressing the original.
+
+**Results** (enwik8 100 MB):
+
+| Compressor | Original | Lowbits + Exceptions | Delta |
+|-----------|----------|---------------------|-------|
+| zstd 1 | 40,676 KB | 40,978 KB | **+0.7% worse** |
+| zstd 9 | 31,130 KB | 31,522 KB | **+1.3% worse** |
+| zstd 19 | 26,944 KB | 27,339 KB | **+1.5% worse** |
+| SLZ L5 | 43,377 KB | 44,161 KB | **+1.8% worse** |
+
+**Why it failed**: Byte-level entropy coders (tANS, Huffman, FSE)
+already capture the high bit's predictability in their frequency
+tables. A byte like 'e' (0x65, high bit=0) gets fewer bits than a
+byte like 0xC3 (high bit=1) automatically. Splitting the bit out
+adds overhead (exception stream positions + separate stream headers)
+that exceeds the tiny entropy savings from the split.
+
+Mathematically: full byte entropy = 5.080 bits/byte. Split encoding
+(7-bit entropy + high-bit entropy) = 5.052 + 0.058 = 5.110 bits/byte.
+The split LOSES 0.030 bits/byte because it destroys the correlation
+between the high bit and the low 7 bits (e.g., UTF-8 continuation
+bytes have high bit=1 AND predictable low bits).
+
+**Lesson**: Partial-bit encoding only wins when done INSIDE the
+entropy coder at the bit level (arithmetic coding with adaptive
+context per bit), not as a pre-filter that splits bits before a
+byte-level coder. A byte-level coder already prices in per-bit
+predictability through its symbol frequency table.
+
+The real path to sub-bit encoding requires replacing tANS with an
+arithmetic coder for the literal stream — which costs ~10-20x slower
+entropy decode. Viable only for L9-L11 where ratio matters more than
+decode speed.
+
+---
+
 ## L1 greedy parser branch misprediction investigation (2026-04-20)
 
 **Context**: VTune uarch-exploration on L1 parallel compress (8T, enwik9
