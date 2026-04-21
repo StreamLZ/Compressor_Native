@@ -21,6 +21,38 @@ improves compress speed.
 
 ---
 
+## SoA cmd stream split: separate lit_count / match_len / offset_type (2026-04-21)
+
+**Hypothesis**: The Fast codec packs lit_count (3 bits), match_len
+(4 bits), and use_recent (1 bit) into a single cmd byte. Splitting
+into three separate streams (Structure of Arrays) would give each
+stream a simpler distribution that entropy-codes tighter. Suggested
+by Gemini as an Oodle-inspired optimization.
+
+**Analysis**: Measured entropy of packed vs split encoding over 1M
+simulated tokens with realistic distributions.
+
+| Encoding | Entropy (independent) | Entropy (correlated) |
+|----------|----------------------|---------------------|
+| Packed cmd byte | 6.870 bits/token | **6.627 bits/token** |
+| Split (lit+match+recent) | 6.870 bits/token | 6.753 bits/token |
+| Difference | 0.000 | **-0.126 bits/token** |
+
+**Result**: With independent fields, entropy is identical — splitting
+neither helps nor hurts. With realistic correlations (recent-offset
+matches tend to have shorter lengths), the packed byte **wins by
+0.126 bits/token** because tANS can exploit the cross-field
+correlation. The packed byte `0x9B` (recent + short match) becomes
+very frequent and gets a short Huffman/tANS code. Split streams see
+only marginal distributions and lose this.
+
+**Disposition**: Not implemented. The packed cmd byte is the correct
+design when fields are correlated, which they are in practice. Oodle
+may split for decode-speed reasons (simpler per-stream tables) but
+it costs ratio.
+
+---
+
 ## High-bit stripping for ASCII literal streams (2026-04-21)
 
 **Hypothesis**: In ASCII text, 99.33% of bytes have high bit = 0.
