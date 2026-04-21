@@ -947,6 +947,29 @@ fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 
 // ─── Benchmark: comparison vs zstd + LZ4 (-bc) ─────────────────────
 
+fn flushMemory() void {
+    const k32 = struct {
+        extern "kernel32" fn SetProcessWorkingSetSize(
+            hProcess: std.os.windows.HANDLE,
+            dwMin: usize,
+            dwMax: usize,
+        ) callconv(.winapi) std.os.windows.BOOL;
+        extern "kernel32" fn HeapCompact(
+            hHeap: std.os.windows.HANDLE,
+            dwFlags: u32,
+        ) callconv(.winapi) usize;
+        extern "kernel32" fn GetProcessHeap() callconv(.winapi) std.os.windows.HANDLE;
+    };
+    // Empty working set — all physical pages go to standby.
+    _ = k32.SetProcessWorkingSetSize(
+        std.os.windows.GetCurrentProcess(),
+        std.math.maxInt(usize),
+        std.math.maxInt(usize),
+    );
+    // Compact the CRT heap — coalesce free blocks, decommit unused pages.
+    _ = k32.HeapCompact(k32.GetProcessHeap(), 0);
+}
+
 fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const runs = args.runs orelse 3;
@@ -1034,6 +1057,8 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         try w.flush();
     }
 
+    flushMemory();
+
     // ── LZ4 HC levels 4, 9, 12 (MT, 4 MB blocks) ──
     const lz4_hc_levels = [_]c_int{ 4, 9, 12 };
     for (lz4_hc_levels) |hc_level| {
@@ -1078,6 +1103,8 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         }
         try w.flush();
     }
+
+    flushMemory();
 
     // ── zstd levels 1, 3, 9, 19 (MT block-parallel, 4 MB blocks) ──
     const zstd_levels = [_]c_int{ 1, 3, 9, 19 };
@@ -1124,9 +1151,12 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
         try w.flush();
     }
 
+    flushMemory();
+
     // ── StreamLZ levels 1, 3, 5, 6, 8, 9, 11 (with threads) ──
     const slz_levels = [_]u8{ 1, 3, 5, 6, 8, 9, 11 };
     for (slz_levels) |slz_level| {
+        flushMemory();
         var name_buf: [16]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "SLZ L{d}", .{slz_level}) catch "SLZ ?";
         try w.print("  {s} ...", .{name});
