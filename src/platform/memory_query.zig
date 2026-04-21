@@ -99,6 +99,111 @@ pub fn calculateMaxThreads(src_len: usize) u32 {
 }
 
 // ────────────────────────────────────────────────────────────
+//  P-core detection and thread affinity
+// ────────────────────────────────────────────────────────────
+
+const SYSTEM_CPU_SET_INFORMATION = extern struct {
+    Size: u32,
+    Type: u32,
+    Id: u32,
+    Group: u16,
+    LogicalProcessorIndex: u8,
+    CoreIndex: u8,
+    LastLevelCacheIndex: u8,
+    NumaNodeIndex: u8,
+    EfficiencyClass: u8,
+    AllFlags: u8,
+    Reserved: u32 = 0,
+    AllocationTag: u64 = 0,
+};
+
+extern "kernel32" fn GetSystemCpuSetInformation(
+    Information: ?[*]SYSTEM_CPU_SET_INFORMATION,
+    BufferLength: u32,
+    ReturnedLength: *u32,
+    Process: ?std.os.windows.HANDLE,
+    Flags: u32,
+) callconv(.winapi) std.os.windows.BOOL;
+
+extern "kernel32" fn SetThreadSelectedCpuSets(
+    Thread: std.os.windows.HANDLE,
+    CpuSetIds: [*]const u32,
+    CpuSetIdCount: u32,
+) callconv(.winapi) std.os.windows.BOOL;
+
+pub const CoreInfo = struct {
+    p_core_count: u32,
+    e_core_count: u32,
+    p_core_ids: [64]u32 = undefined,
+    e_core_ids: [64]u32 = undefined,
+    total_cores: u32,
+    is_hybrid: bool,
+};
+
+pub fn detectCores() CoreInfo {
+    if (@import("builtin").os.tag != .windows) {
+        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+        return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
+    }
+
+    var needed: u32 = 0;
+    _ = GetSystemCpuSetInformation(null, 0, &needed, null, 0);
+    if (needed == 0) {
+        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+        return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
+    }
+
+    var buf: [256]SYSTEM_CPU_SET_INFORMATION = undefined;
+    const buf_bytes: u32 = @intCast(@min(needed, @sizeOf(@TypeOf(buf))));
+    var returned: u32 = 0;
+    if (GetSystemCpuSetInformation(&buf, buf_bytes, &returned, null, 0) == 0) {
+        const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
+        return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
+    }
+
+    const count = returned / @sizeOf(SYSTEM_CPU_SET_INFORMATION);
+    var max_efficiency: u8 = 0;
+    for (buf[0..count]) |info| {
+        if (info.EfficiencyClass > max_efficiency) max_efficiency = info.EfficiencyClass;
+    }
+
+    var result: CoreInfo = .{
+        .p_core_count = 0,
+        .e_core_count = 0,
+        .total_cores = @intCast(count),
+        .is_hybrid = max_efficiency > 0,
+    };
+
+    for (buf[0..count]) |info| {
+        if (info.EfficiencyClass == max_efficiency and result.p_core_count < 64) {
+            result.p_core_ids[result.p_core_count] = info.Id;
+            result.p_core_count += 1;
+        } else if (result.e_core_count < 64) {
+            result.e_core_ids[result.e_core_count] = info.Id;
+            result.e_core_count += 1;
+        }
+    }
+
+    if (result.p_core_count == 0) {
+        result.p_core_count = @intCast(count);
+        result.is_hybrid = false;
+    }
+
+    return result;
+}
+
+extern "kernel32" fn GetCurrentThread() callconv(.winapi) std.os.windows.HANDLE;
+
+pub fn pinCurrentThreadToCpuSet(ids: []const u32) void {
+    if (@import("builtin").os.tag != .windows or ids.len == 0) return;
+    _ = SetThreadSelectedCpuSets(
+        GetCurrentThread(),
+        ids.ptr,
+        @intCast(ids.len),
+    );
+}
+
+// ────────────────────────────────────────────────────────────
 //  Tests
 // ────────────────────────────────────────────────────────────
 

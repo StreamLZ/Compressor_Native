@@ -1114,7 +1114,7 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
     flushMemory();
 
     // ── zstd levels 1, 3, 9, 19 (MT block-parallel, 4 MB blocks) ──
-    const zstd_levels_fast = [_]c_int{ 1, 3 };
+    const zstd_levels_fast = [_]c_int{ 1, 3, 19 };
     const zstd_levels_full = [_]c_int{ 1, 3, 9, 19 };
     const zstd_levels: []const c_int = if (fast_only) &zstd_levels_fast else &zstd_levels_full;
     for (zstd_levels) |zstd_level| {

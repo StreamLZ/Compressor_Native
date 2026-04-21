@@ -21,6 +21,54 @@ improves compress speed.
 
 ---
 
+## P-core vs E-core thread pinning for hybrid CPUs (2026-04-21)
+
+**Context**: Arrow Lake has 8 P-cores and 16 E-cores. VTune memory-access
+profiling showed L1 decompress hitting 85/93 GB/s DRAM bandwidth (92%
+saturated) at 8+ threads. Hypothesis: pinning decoder threads to P-cores
+only would avoid E-core cache thrashing and improve throughput.
+
+**Experiment**: Pin single-thread decompress to a P-core vs an E-core
+using `SetThreadSelectedCpuSets` + `GetSystemCpuSetInformation`
+(universal Windows API — works on any hybrid architecture via
+`EfficiencyClass`).
+
+**Results** (enwik8 100 MB, single-thread, pinned):
+
+| Level | P-core | E-core | P/E ratio |
+|-------|--------|--------|-----------|
+| L1 | 5,841 MB/s | 5,412 MB/s | 1.08x |
+| L5 | 3,233 MB/s | 3,173 MB/s | 1.02x |
+| L6 | 943 MB/s | 777 MB/s | 1.21x |
+
+**Multi-thread scaling** (L1 decompress, no pinning):
+
+| Threads | Speed | Scaling |
+|---------|-------|---------|
+| 1 | 6,201 MB/s | 1.0x |
+| 4 | 22,416 MB/s | 3.6x |
+| 8 | 32,816 MB/s | 5.3x |
+| 12 | 32,858 MB/s | 5.3x |
+| 24 | 32,335 MB/s | 5.2x |
+
+VTune memory-access confirmed: **DRAM Bandwidth Bound = 86.7%** at
+10 threads, observed peak 85.4 GB/s of 93 GB/s theoretical.
+
+**Why pinning doesn't help**:
+- L1-L5 are DRAM-bandwidth-bound. Core type doesn't matter — both
+  hit the same memory bus. P-core is only 2-8% faster per-thread.
+- L6+ are CPU-bound and P-cores are 21% faster per-core. But L6 at
+  943 MB/s × 8 P-cores = 7.5 GB/s, far below the 85 GB/s DRAM wall.
+  There's room for all 24 cores including E-cores.
+- Using only 8 P-cores (29 GB/s) was SLOWER than all 24 cores
+  (31 GB/s) because E-cores contribute despite being individually weaker.
+
+**Disposition**: No pinning implemented. The OS scheduler already does
+the right thing. The `detectCores` and `pinCurrentThreadToCpuSet`
+utilities remain in `platform/memory_query.zig` for future use.
+
+---
+
 ## L1 compress: eliminate dictionary_size bounds check for u16 hash (2026-04-21)
 
 **Context**: VTune assembly-level profiling showed `mov r10, qword ptr
