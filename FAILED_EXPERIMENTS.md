@@ -21,6 +21,31 @@ improves compress speed.
 
 ---
 
+## L1 compress: eliminate dictionary_size bounds check for u16 hash (2026-04-21)
+
+**Context**: VTune assembly-level profiling showed `mov r10, qword ptr
+[rbp+0x90]` (dictionary_size stack load) at 464M cycles in the parser
+hot loop. For L1's u16 hash, max offset is 65535 which is always <
+dictionary_size (1 GB), so the check is always true.
+
+**Change**: Guard with `(T == u16 or offset_candidate < dictionary_size)`
+so the comptime branch eliminates the load for L1.
+
+**Result**: LLVM restructured the bounds check from branched `cmp + ja`
+to branchless `setnb + setbe + test`. The dictionary_size stack load
+disappeared. VTune confirmed the offset-8 compare cycles dropped 26%
+(2,554M → 1,887M) due to fewer upstream pipeline flushes. But wall
+time was **6% slower** (527 → 496 MB/s) because the branchless `setcc`
+sequence adds 3 µops that the OoO engine couldn't hide.
+
+**Lesson**: Fewer mispredicts ≠ faster. The branched version with the
+"wasted" stack load was faster because OoO execution hid the load
+latency behind branch computation. The extra `setcc` µops from the
+branchless path saturated the execution ports more than the
+mispredicts cost.
+
+---
+
 ## SoA cmd stream split: separate lit_count / match_len / offset_type (2026-04-21)
 
 **Hypothesis**: The Fast codec packs lit_count (3 bits), match_len
