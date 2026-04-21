@@ -21,6 +21,7 @@ const Mode = enum {
     bench_decompress,
     bench_all,
     bench_compare,
+    bench_compare_fast,
     train,
     info,
     version,
@@ -86,7 +87,10 @@ fn parseArgs(raw: []const []const u8, w: *std.Io.Writer) Args {
         }
         if (eql(arg, "-bc")) {
             result.mode = .bench_compare;
-
+            continue;
+        }
+        if (eql(arg, "-bcf")) {
+            result.mode = .bench_compare_fast;
             continue;
         }
         if (eql(arg, "-ba")) {
@@ -218,7 +222,8 @@ pub fn run() !void {
         .bench => try runBenchCompress(allocator, w, args),
         .bench_decompress => try runBenchDecompress(allocator, w, args),
         .bench_all => try runBenchAll(allocator, w, args),
-        .bench_compare => try runBenchCompare(allocator, w, args),
+        .bench_compare => try runBenchCompare(allocator, w, args, false),
+        .bench_compare_fast => try runBenchCompare(allocator, w, args, true),
         .info => try runInfo(allocator, w, args),
         .train => try runTrain(allocator, w, args),
     }
@@ -970,7 +975,7 @@ fn flushMemory() void {
     _ = k32.HeapCompact(k32.GetProcessHeap(), 0);
 }
 
-fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, fast_only: bool) !void {
     const in_path = requireInput(args, w);
     const runs = args.runs orelse 3;
     const threads: c_int = if (args.threads > 0) @intCast(args.threads) else 8;
@@ -1060,7 +1065,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
     flushMemory();
 
     // ── LZ4 HC levels 4, 9, 12 (MT, 4 MB blocks) ──
-    const lz4_hc_levels = [_]c_int{ 4, 9, 12 };
+    const lz4_hc_levels_fast = [_]c_int{9};
+    const lz4_hc_levels_full = [_]c_int{ 4, 9, 12 };
+    const lz4_hc_levels: []const c_int = if (fast_only) &lz4_hc_levels_fast else &lz4_hc_levels_full;
     for (lz4_hc_levels) |hc_level| {
         var name_buf: [16]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "LZ4 HC {d} MT", .{hc_level}) catch "LZ4 HC ?";
@@ -1107,7 +1114,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
     flushMemory();
 
     // ── zstd levels 1, 3, 9, 19 (MT block-parallel, 4 MB blocks) ──
-    const zstd_levels = [_]c_int{ 1, 3, 9, 19 };
+    const zstd_levels_fast = [_]c_int{ 1, 3 };
+    const zstd_levels_full = [_]c_int{ 1, 3, 9, 19 };
+    const zstd_levels: []const c_int = if (fast_only) &zstd_levels_fast else &zstd_levels_full;
     for (zstd_levels) |zstd_level| {
         var name_buf: [16]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "zstd {d} MT", .{zstd_level}) catch "zstd ?";
@@ -1154,7 +1163,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) 
     flushMemory();
 
     // ── StreamLZ levels 1, 3, 5, 6, 8, 9, 11 (with threads) ──
-    const slz_levels = [_]u8{ 1, 3, 5, 6, 8, 9, 11 };
+    const slz_levels_fast = [_]u8{ 1, 3, 5 };
+    const slz_levels_full = [_]u8{ 1, 3, 5, 6, 8, 9, 11 };
+    const slz_levels: []const u8 = if (fast_only) &slz_levels_fast else &slz_levels_full;
     for (slz_levels) |slz_level| {
         flushMemory();
         var name_buf: [16]u8 = undefined;
