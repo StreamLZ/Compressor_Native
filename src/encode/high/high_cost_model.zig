@@ -228,7 +228,8 @@ pub inline fn bitsForLiteral(
         return cost_model.lit_cost[src[pos]];
     }
     const byte_cur: u8 = src[pos];
-    const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos) +% @as(usize, @bitCast(@as(isize, recent)))))[0];
+    const abs_recent: usize = @intCast(-@as(i64, recent));
+    const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos) - abs_recent))[0];
     const delta: u8 = byte_cur -% byte_prev;
     return cost_model.lit_cost[delta];
 }
@@ -253,7 +254,8 @@ pub inline fn bitsForLiterals(
     var i: usize = 0;
     while (i < num) : (i += 1) {
         const byte_cur: u8 = src[pos + i];
-        const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos + i) +% @as(usize, @bitCast(@as(isize, recent)))))[0];
+        const abs_recent_l: usize = @intCast(-@as(i64, recent));
+        const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos + i) - abs_recent_l))[0];
         const delta: u8 = byte_cur -% byte_prev;
         sum += cost_model.lit_cost[delta];
     }
