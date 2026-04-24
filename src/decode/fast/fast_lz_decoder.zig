@@ -399,8 +399,8 @@ fn processModeImpl(
         cmd_stream += 1;
 
         if (cmd >= 24) {
-            // ── Short token (~90% of commands) ──
             if (@intFromPtr(dst) >= @intFromPtr(dst_safe_end)) {
+                @branchHint(.cold);
                 if (@intFromPtr(dst) >= @intFromPtr(dst_end)) return error.OutputTruncated;
             }
             const new_dist: i64 = off16_stream[0];
