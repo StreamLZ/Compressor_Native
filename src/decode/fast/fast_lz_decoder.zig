@@ -399,6 +399,7 @@ fn processModeImpl(
         cmd_stream += 1;
 
         if (cmd >= 24) {
+            @branchHint(.likely);
             if (@intFromPtr(dst) >= @intFromPtr(dst_safe_end)) {
                 @branchHint(.cold);
                 if (@intFromPtr(dst) >= @intFromPtr(dst_end)) return error.OutputTruncated;
@@ -434,7 +435,6 @@ fn processModeImpl(
             copy.copy64(dst + 8, match_ptr + 8);
             dst += (cmd >> 3) & 0xF;
         } else if (cmd > 2) {
-            // ── Medium match: 32-bit far offset, length = cmd + 5 ──
             const length: usize = cmd + 5;
             if (@intFromPtr(off32_stream) == @intFromPtr(off32_stream_end)) {
                 @branchHint(.cold);
@@ -453,7 +453,7 @@ fn processModeImpl(
             copy.copy16(dst + 16, match_ptr + 16);
             dst += length;
         } else if (cmd == 0) {
-            // ── Long literal run ──
+            @branchHint(.cold);
             if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
                 @branchHint(.cold);
                 return error.SourceTruncated;
@@ -495,7 +495,7 @@ fn processModeImpl(
             dst = ptr_math.offsetPtr([*]u8, dst, remaining);
             lit_stream = ptr_math.offsetPtr([*]const u8, lit_stream, remaining);
         } else if (cmd == 1) {
-            // ── Long match with 16-bit offset ──
+            @branchHint(.cold);
             if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
                 @branchHint(.cold);
                 return error.SourceTruncated;
@@ -538,7 +538,7 @@ fn processModeImpl(
             }
             dst += length;
         } else {
-            // ── cmd == 2: Long match with 32-bit offset ──
+            @branchHint(.cold);
             if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
                 @branchHint(.cold);
                 return error.SourceTruncated;
