@@ -436,19 +436,28 @@ fn processModeImpl(
         } else if (cmd > 2) {
             // ── Medium match: 32-bit far offset, length = cmd + 5 ──
             const length: usize = cmd + 5;
-            if (@intFromPtr(off32_stream) == @intFromPtr(off32_stream_end)) return error.OutputTruncated;
+            if (@intFromPtr(off32_stream) == @intFromPtr(off32_stream_end)) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
             if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
-            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
             copy.copy16(dst, match_ptr);
             copy.copy16(dst + 16, match_ptr + 16);
             dst += length;
         } else if (cmd == 0) {
             // ── Long literal run ──
-            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) return error.SourceTruncated;
+            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             var length: usize = length_stream[0];
             if (length > extended_length_threshold) {
                 if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) < 3) return error.SourceTruncated;
@@ -461,6 +470,7 @@ fn processModeImpl(
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length or
                 @intFromPtr(lit_stream_end) - @intFromPtr(lit_stream) < length)
             {
+                @branchHint(.cold);
                 return error.OutputTruncated;
             }
 
@@ -482,12 +492,14 @@ fn processModeImpl(
                     remaining -= 16;
                 }
             }
-            // Overshoot correction: remaining is ≤ 0, so subtract back to exact length.
             dst = ptr_math.offsetPtr([*]u8, dst, remaining);
             lit_stream = ptr_math.offsetPtr([*]const u8, lit_stream, remaining);
         } else if (cmd == 1) {
             // ── Long match with 16-bit offset ──
-            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) return error.SourceTruncated;
+            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             var length: usize = length_stream[0];
             if (length > extended_length_threshold) {
                 if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) < 3) return error.SourceTruncated;
@@ -497,18 +509,23 @@ fn processModeImpl(
             length_stream += 1;
             length += 91;
 
-            if (@intFromPtr(off16_stream) == @intFromPtr(off16_stream_end)) return error.OutputTruncated;
+            if (@intFromPtr(off16_stream) == @intFromPtr(off16_stream_end)) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
             const off16: u16 = off16_stream[0];
             off16_stream += 1;
             const match_ptr: [*]const u8 = dst - off16;
-            if (@intFromPtr(match_ptr) < @intFromPtr(dst_start)) return error.MatchOutOfBounds;
+            if (@intFromPtr(match_ptr) < @intFromPtr(dst_start)) {
+                @branchHint(.cold);
+                return error.MatchOutOfBounds;
+            }
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
-            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
 
-            // Long match with 16-bit offset: offset can be as small as
-            // the encoder's minimum (8), so we must preserve the 2×
-            // copy64 cascade — the second 8-byte read picks up the
-            // first 8-byte store, propagating any repeating pattern.
             var m = match_ptr;
             var d = dst;
             var remaining: isize = @intCast(length);
@@ -522,7 +539,10 @@ fn processModeImpl(
             dst += length;
         } else {
             // ── cmd == 2: Long match with 32-bit offset ──
-            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) return error.SourceTruncated;
+            if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) == 0) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             var length: usize = length_stream[0];
             if (length > extended_length_threshold) {
                 if (@intFromPtr(lz.src_end) - @intFromPtr(length_stream) < 3) return error.SourceTruncated;
@@ -531,13 +551,19 @@ fn processModeImpl(
             }
             length_stream += 1;
             length += 29;
-            if (@intFromPtr(off32_stream) == @intFromPtr(off32_stream_end)) return error.OutputTruncated;
+            if (@intFromPtr(off32_stream) == @intFromPtr(off32_stream_end)) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
             if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
-            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) return error.OutputTruncated;
+            if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) {
+                @branchHint(.cold);
+                return error.OutputTruncated;
+            }
 
             var m = match_ptr;
             var d = dst;
