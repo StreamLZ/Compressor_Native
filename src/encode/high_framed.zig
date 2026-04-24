@@ -364,9 +364,13 @@ pub fn compressFramedHigh(
         while (can_compress and src_off < effective_src_h.len) {
             const block_src_len: usize = @min(effective_src_h.len - src_off, lz_constants.chunk_size);
             const block_dst_remaining: usize = dst.len - pos;
-            const keyframe = self_contained or src_off == dict_len_h;
+            const chunk_idx = (src_off - dict_len_h) / lz_constants.chunk_size;
+            const at_group_start = (chunk_idx % lz_constants.sc_group_size) == 0;
+            const keyframe = (self_contained and at_group_start) or src_off == dict_len_h;
+            var chunk_ctx = ctx;
+            chunk_ctx.force_initial_copy = self_contained and at_group_start;
             const written = try compressOneHighBlock(
-                &ctx,
+                &chunk_ctx,
                 &hasher,
                 if (mls_opt) |*m| m else null,
                 effective_src_h,
@@ -632,6 +636,7 @@ pub fn compressOneHighBlock(
 
     var total_cost: f32 = 0;
     var sub_off: usize = 0;
+    const orig_force_initial = ctx.force_initial_copy;
 
     while (sub_off < block_src_len) {
         const round_bytes: usize = @min(block_src_len - sub_off, high_compressor.sub_chunk_size);
@@ -661,8 +666,10 @@ pub fn compressOneHighBlock(
             const dst_remaining_for_sub: usize = dst_block.len - sub_payload_start;
             const dst_sub_start: [*]u8 = dst_block[sub_payload_start..].ptr;
             const dst_sub_end: [*]u8 = dst_sub_start + dst_remaining_for_sub;
+            var sub_ctx = ctx.*;
+            sub_ctx.force_initial_copy = orig_force_initial and sub_off == 0;
             const n_opt: ?usize = high_compressor.doCompress(
-                ctx,
+                &sub_ctx,
                 hasher,
                 mls_ptr,
                 sub_src.ptr,

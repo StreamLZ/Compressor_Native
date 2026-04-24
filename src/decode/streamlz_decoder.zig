@@ -736,24 +736,27 @@ fn decompressCompressedBlock(
                 const src_slice_end: [*]const u8 = src_slice_start + comp_size;
                 const dst_ptr: [*]u8 = dst[dst_off..].ptr;
                 const dst_end_ptr: [*]u8 = dst_ptr + dst_this_chunk;
-                // For SC mode, dst_start must be the FIRST chunk of the
-                // current SC group (not the whole output) so that the
-                // encoder's per-group `base_offset == 0` assumption holds
-                // and the initial 8-byte Copy64 fires at each group start.
-                // For non-SC, use the whole-buffer start (sliding window).
-                const dst_start_ptr: [*]const u8 = if (is_sc) blk: {
-                    const gs: usize = sc_group_size;
-                    const group_start_chunk = (chunk_idx_in_block / gs) * gs;
-                    const group_start_offset = sc_start_dst_off + group_start_chunk * constants.chunk_size;
-                    break :blk dst[group_start_offset..].ptr;
-                } else dst.ptr;
                 const scratch_ptr: [*]u8 = scratch.ptr;
                 const scratch_end_ptr: [*]u8 = scratch.ptr + scratch.len;
 
-                const n = try high.decodeChunk(
+                const n = if (is_sc) blk: {
+                    const gs: usize = sc_group_size;
+                    const group_start_chunk = (chunk_idx_in_block / gs) * gs;
+                    const group_start_offset = sc_start_dst_off + group_start_chunk * constants.chunk_size;
+                    break :blk try high.decodeChunkSc(
+                        dst_ptr,
+                        dst_end_ptr,
+                        dst[group_start_offset..].ptr,
+                        dst.ptr,
+                        src_slice_start,
+                        src_slice_end,
+                        scratch_ptr,
+                        scratch_end_ptr,
+                    );
+                } else try high.decodeChunk(
                     dst_ptr,
                     dst_end_ptr,
-                    dst_start_ptr,
+                    dst.ptr,
                     src_slice_start,
                     src_slice_end,
                     scratch_ptr,

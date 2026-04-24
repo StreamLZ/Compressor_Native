@@ -560,6 +560,32 @@ pub fn decodeChunk(
     scratch: [*]u8,
     scratch_end: [*]u8,
 ) DecodeError!usize {
+    return decodeChunkInner(dst_in, dst_end, dst_start, dst_start, src_in, src_end, scratch, scratch_end);
+}
+
+pub fn decodeChunkSc(
+    dst_in: [*]u8,
+    dst_end: [*]u8,
+    dst_initial_copy_base: [*]const u8,
+    dst_match_base: [*]const u8,
+    src_in: [*]const u8,
+    src_end: [*]const u8,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
+) DecodeError!usize {
+    return decodeChunkInner(dst_in, dst_end, dst_initial_copy_base, dst_match_base, src_in, src_end, scratch, scratch_end);
+}
+
+fn decodeChunkInner(
+    dst_in: [*]u8,
+    dst_end: [*]u8,
+    dst_initial_copy_base: [*]const u8,
+    dst_match_base: [*]const u8,
+    src_in: [*]const u8,
+    src_end: [*]const u8,
+    scratch: [*]u8,
+    scratch_end: [*]u8,
+) DecodeError!usize {
     var src = src_in;
     var dst = dst_in;
 
@@ -605,16 +631,17 @@ pub fn decodeChunk(
                     src + src_used,
                     dst,
                     @intCast(dst_count),
-                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_start)),
+                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_initial_copy_base)),
                     inner_scratch,
                     inner_scratch_end,
                     lz_ptr,
                 );
-                try runs.processLzRuns(
+                try runs.processLzRunsSc(
                     mode,
                     dst,
                     dst_count,
-                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_start)),
+                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_initial_copy_base)),
+                    @intCast(@intFromPtr(dst) - @intFromPtr(dst_match_base)),
                     lz_ptr,
                     scratch + scratch_usage,
                     scratch_end,

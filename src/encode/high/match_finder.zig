@@ -135,10 +135,12 @@ pub fn findMatchesHashBased(
             const v3: V = @as(VP, @ptrCast(h_ptr + 12))[0];
 
             // u_n = ((maxPos - vN) & mask26) + 1   — the candidate offset.
-            const off0: V = ((v_max_pos - v0) & v_mask26) + v_one;
-            const off1: V = ((v_max_pos - v1) & v_mask26) + v_one;
-            const off2: V = ((v_max_pos - v2) & v_mask26) + v_one;
-            const off3: V = ((v_max_pos - v3) & v_mask26) + v_one;
+            // Wrapping subtraction: hash entries are u32 positions reinterpreted as i32;
+            // uninitialized or distant entries can cause signed overflow.
+            const off0: V = ((v_max_pos -% v0) & v_mask26) + v_one;
+            const off1: V = ((v_max_pos -% v1) & v_mask26) + v_one;
+            const off2: V = ((v_max_pos -% v2) & v_mask26) + v_one;
+            const off3: V = ((v_max_pos -% v3) & v_mask26) + v_one;
 
             // Match condition: off_n <= v_max_off AND (vN ^ hashHigh) & highMask == 0
             // We compute: !(out_of_range OR tag_mismatch).

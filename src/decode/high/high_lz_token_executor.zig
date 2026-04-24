@@ -31,10 +31,36 @@ pub fn processLzRuns(
     scratch_free: [*]u8,
     scratch_end: [*]u8,
 ) DecodeError!void {
+    return processLzRunsInner(mode, dst, dst_size, base_offset, base_offset, lz, scratch_free, scratch_end);
+}
+
+pub fn processLzRunsSc(
+    mode: u32,
+    dst: [*]u8,
+    dst_size: usize,
+    initial_copy_offset: usize,
+    match_base_offset: usize,
+    lz: *const high.HighLzTable,
+    scratch_free: [*]u8,
+    scratch_end: [*]u8,
+) DecodeError!void {
+    return processLzRunsInner(mode, dst, dst_size, initial_copy_offset, match_base_offset, lz, scratch_free, scratch_end);
+}
+
+fn processLzRunsInner(
+    mode: u32,
+    dst: [*]u8,
+    dst_size: usize,
+    initial_copy_offset: usize,
+    match_base_offset: usize,
+    lz: *const high.HighLzTable,
+    scratch_free: [*]u8,
+    scratch_end: [*]u8,
+) DecodeError!void {
     if (dst_size == 0) return error.OutputTruncated;
     const dst_end: [*]u8 = dst + dst_size;
-    const dst_start: [*]const u8 = @ptrFromInt(@intFromPtr(dst) - base_offset);
-    const dst_run_start: [*]u8 = dst + (if (base_offset == 0) @as(usize, 8) else 0);
+    const dst_start: [*]const u8 = @ptrFromInt(@intFromPtr(dst) - match_base_offset);
+    const dst_run_start: [*]u8 = dst + (if (initial_copy_offset == 0) @as(usize, 8) else 0);
 
     switch (mode) {
         0 => try processLzRunsType0(lz, dst_run_start, dst_end, dst_start),

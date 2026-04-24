@@ -175,7 +175,7 @@ pub fn compressFast(
     }
 
     const min_match_length: i32 = @intCast(@max(opts.min_match_length, 4));
-    const initial_copy_bytes: usize = if (start_pos == 0) 8 else 0;
+    const initial_copy_bytes: usize = if (start_pos == 0 or ctx.force_initial_copy) 8 else 0;
     var cur_pos: usize = initial_copy_bytes;
 
     var recent = HighRecentOffs.create();

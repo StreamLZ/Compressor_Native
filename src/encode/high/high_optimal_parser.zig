@@ -173,7 +173,7 @@ fn collectStatistics(
     try high_encoder.initializeStreamWriter(&writer, &storage, ctx.allocator, source_length, source, @intCast(ctx.encode_flags));
     defer storage.deinit();
 
-    const initial_copy_bytes: usize = if (start_pos == 0) 8 else 0;
+    const initial_copy_bytes: usize = if (start_pos == 0 or ctx.force_initial_copy) 8 else 0;
     var pos: usize = initial_copy_bytes;
     var last_pos: usize = initial_copy_bytes;
     const src_len_usize: usize = @intCast(source_length);
@@ -978,7 +978,7 @@ pub fn optimal(
     const sc = opts.self_contained;
     const sc_pos_in_chunk: i32 = start_pos;
 
-    const initial_copy_bytes: i32 = if (start_pos == 0) 8 else 0;
+    const initial_copy_bytes: i32 = if (start_pos == 0 or ctx.force_initial_copy) 8 else 0;
     const src_end_safe: [*]const u8 = source + src_len_usize - 8;
     var min_match_length: i32 = @intCast(@max(opts.min_match_length, 4));
     const length_long_enough_thres: usize = @as(usize, 1) << @intCast(@min(8, ctx.compression_level));

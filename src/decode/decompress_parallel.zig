@@ -305,11 +305,11 @@ fn decodeOneChunk(
             if (n != comp_size) return error.ChunkSizeMismatch;
         },
         .high => {
-            const dst_start_ptr: [*]const u8 = dst[group_dst_start_off..].ptr;
-            const n = try high.decodeChunk(
+            const n = try high.decodeChunkSc(
                 dst_ptr,
                 dst_end_ptr,
-                dst_start_ptr,
+                dst[group_dst_start_off..].ptr,
+                dst.ptr,
                 src_slice_start,
                 src_slice_end,
                 scratch_ptr,

@@ -56,6 +56,7 @@ pub const HighEncoderContext = struct {
     /// reads `prev_stats` to seed the cost model and writes back the
     /// final stats for the next block. `null` = independent blocks.
     cross_block: ?*HighCrossBlockState = null,
+    force_initial_copy: bool = false,
 };
 
 /// Owns the backing scratch allocation for a `HighStreamWriter`.
@@ -482,7 +483,7 @@ pub fn assembleCompressedOutput(
     const source: [*]const u8 = writer.src_ptr;
     const source_length: usize = @intCast(writer.src_len);
 
-    const initial_bytes: usize = if (start_pos == 0) 8 else 0;
+    const initial_bytes: usize = if (start_pos == 0 or ctx.force_initial_copy) 8 else 0;
     {
         var i: usize = 0;
         while (i < initial_bytes) : (i += 1) {
@@ -664,7 +665,7 @@ pub fn encodeTokenArray(
     defer storage.deinit();
 
     var cur_src: [*]const u8 = source;
-    if (start_pos == 0) cur_src += 8;
+    if (start_pos == 0 or ctx.force_initial_copy) cur_src += 8;
 
     for (tokens) |tok| {
         addToken(
