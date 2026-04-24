@@ -33,7 +33,7 @@ pub const ManagedMatchLenStorage = struct {
     /// reserved for "no matches" in `offset2_pos`).
     byte_buffer_use: usize,
     /// Maps source offset to position in `byte_buffer`.
-    offset2_pos: []i32,
+    offset2_pos: []i64,
     /// Base offset of the source window within the match finder's byte array.
     window_base_offset: i32 = 0,
     /// Absolute start-position of the round that populated this MLS.
@@ -43,7 +43,7 @@ pub const ManagedMatchLenStorage = struct {
     pub fn init(allocator: std.mem.Allocator, entries: usize, avg_bytes: f32) !ManagedMatchLenStorage {
         const byte_cap: usize = @intFromFloat(@as(f32, @floatFromInt(entries)) * avg_bytes);
         const byte_buffer = try allocator.alloc(u8, byte_cap);
-        const offset2_pos = try allocator.alloc(i32, entries);
+        const offset2_pos = try allocator.alloc(i64, entries);
         @memset(offset2_pos, 0);
         return .{
             .byte_buffer = byte_buffer,
@@ -68,7 +68,7 @@ pub const ManagedMatchLenStorage = struct {
         }
         if (self.offset2_pos.len < entries) {
             self.allocator.free(self.offset2_pos);
-            self.offset2_pos = try self.allocator.alloc(i32, entries);
+            self.offset2_pos = try self.allocator.alloc(i64, entries);
         }
         @memset(self.offset2_pos[0..entries], 0);
         self.byte_buffer_use = 1;
@@ -294,7 +294,7 @@ pub fn extractLaoFromMls(
         s -= 1;
         off += 1;
     }) {
-        const pos: i32 = mls.offset2_pos[off];
+        const pos: i64 = mls.offset2_pos[off];
         if (pos != 0) {
             var cur_pos: usize = @intCast(pos);
             if (cur_pos == 0 or cur_pos + 32 > mls.byte_buffer.len) {
@@ -351,7 +351,7 @@ test "ManagedMatchLenStorage init + reset" {
 
     try mls.reset(100, 8.0);
     try testing.expectEqual(@as(usize, 1), mls.byte_buffer_use);
-    try testing.expectEqual(@as(i32, 0), mls.offset2_pos[0]);
+    try testing.expectEqual(@as(i64, 0), mls.offset2_pos[0]);
 }
 
 test "varLen length codec round-trips a small length" {
