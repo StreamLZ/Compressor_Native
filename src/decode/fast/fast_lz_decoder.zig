@@ -443,7 +443,10 @@ fn processModeImpl(
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
-            if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
+            if (far > 65536) {
+                @branchHint(.cold);
+                @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
+            }
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) {
                 @branchHint(.cold);
@@ -558,7 +561,10 @@ fn processModeImpl(
             const far: u32 = off32_stream[0];
             off32_stream += 1;
             const match_ptr: [*]const u8 = dst_begin - far;
-            if (far > 65536) @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
+            if (far > 65536) {
+                @branchHint(.cold);
+                @prefetch(match_ptr, .{ .rw = .read, .locality = 1 });
+            }
             recent_offs = @as(i64, @intCast(@intFromPtr(match_ptr))) - @as(i64, @intCast(@intFromPtr(dst)));
             if (@intFromPtr(dst_end) - @intFromPtr(dst) < length) {
                 @branchHint(.cold);
