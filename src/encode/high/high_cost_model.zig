@@ -227,9 +227,8 @@ pub inline fn bitsForLiteral(
         // Copy mode: literal is the raw source byte, no delta.
         return cost_model.lit_cost[src[pos]];
     }
-    const recent_u: usize = @intCast(recent);
     const byte_cur: u8 = src[pos];
-    const byte_prev: u8 = src[pos - recent_u];
+    const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos) +% @as(usize, @bitCast(@as(isize, recent)))))[0];
     const delta: u8 = byte_cur -% byte_prev;
     return cost_model.lit_cost[delta];
 }
@@ -250,12 +249,11 @@ pub inline fn bitsForLiterals(
         }
         return sum;
     }
-    const recent_u: usize = @intCast(recent);
     var sum: u32 = 0;
     var i: usize = 0;
     while (i < num) : (i += 1) {
         const byte_cur: u8 = src[pos + i];
-        const byte_prev: u8 = src[pos + i - recent_u];
+        const byte_prev: u8 = @as([*]const u8, @ptrFromInt(@intFromPtr(src + pos + i) +% @as(usize, @bitCast(@as(isize, recent)))))[0];
         const delta: u8 = byte_cur -% byte_prev;
         sum += cost_model.lit_cost[delta];
     }
