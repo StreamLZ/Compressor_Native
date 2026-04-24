@@ -179,7 +179,7 @@ fn processLzRunsType0(
         }
 
         if (@intFromPtr(dst + lit_len_i + match_len_i) >= @intFromPtr(dst_safe_end)) {
-            // Slow exact-copy tail.
+            @branchHint(.cold);
             if (@intFromPtr(dst + lit_len_i + match_len_i) > @intFromPtr(dst_end)) return error.OutputTruncated;
 
             copyLiteralAddExact(dst, lit_stream, lit_off_i, lit_len_i);
@@ -537,7 +537,7 @@ inline fn processOneToken(
     const dst_after_all: [*]u8 = dst_token_start + lit_len + match_len;
 
     if (@intFromPtr(dst_after_all) > @intFromPtr(dst_safe_end)) {
-        // Slow exact path for trailing tokens.
+        @branchHint(.cold);
         if (@intFromPtr(dst_after_all) > @intFromPtr(dst_end)) return error.OutputTruncated;
         var d = dst_token_start;
         var lrem = lit_len;
@@ -547,7 +547,10 @@ inline fn processOneToken(
             lit_stream += 1;
         }
         const match_addr_slow: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
-        if (match_addr_slow < @intFromPtr(dst_start)) return error.OutputTruncated;
+        if (match_addr_slow < @intFromPtr(dst_start)) {
+            @branchHint(.cold);
+            return error.OutputTruncated;
+        }
         var s: [*]const u8 = @ptrFromInt(match_addr_slow);
         var mrem = match_len;
         while (mrem > 0) : (mrem -= 1) {
@@ -580,7 +583,10 @@ inline fn processOneToken(
     lit_stream += lit_len;
 
     const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
-    if (match_addr < @intFromPtr(dst_start)) return error.OutputTruncated;
+    if (match_addr < @intFromPtr(dst_start)) {
+        @branchHint(.cold);
+        return error.OutputTruncated;
+    }
     const match_ptr: [*]const u8 = @ptrFromInt(match_addr);
     copy.copy64(d, match_ptr);
     copy.copy64(d + 8, match_ptr + 8);
