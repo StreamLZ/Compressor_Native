@@ -65,24 +65,24 @@ between each compressor to prevent cross-test cache/TLB interference.
 
 | Compressor | Ratio | Compress | Decompress |
 |-----------|-------|----------|------------|
-| LZ4 MT    | 57.3% |  5,126 MB/s | 29,477 MB/s |
-| LZ4 HC 9 MT | 42.3% |    406 MB/s | 30,061 MB/s |
-| zstd 1 MT | 40.7% |  3,724 MB/s | 11,613 MB/s |
-| zstd 3 MT | 35.6% |  2,079 MB/s | 11,444 MB/s |
-| zstd 9 MT | 31.8% |    344 MB/s | 12,132 MB/s |
-| zstd 19 MT | 29.0% |   23.5 MB/s | 13,606 MB/s |
-| **SLZ L1**  | 58.6% |  2,677 MB/s | **34,413 MB/s** |
-| **SLZ L3**  | 56.5% |     84 MB/s | **33,190 MB/s** |
-| **SLZ L5**  | 43.4% |     41 MB/s | **11,328 MB/s** |
-| **SLZ L6**  | 31.4% |     38 MB/s |  7,725 MB/s |
-| **SLZ L8**  | 31.0% |     19 MB/s |  7,602 MB/s |
-| **SLZ L9**  | 27.4% |    7.5 MB/s |  2,006 MB/s |
-| **SLZ L11** | 25.6% |    1.4 MB/s |  1,671 MB/s |
+| LZ4 MT    | 57.3% |  4,733 MB/s | 28,236 MB/s |
+| LZ4 HC 9 MT | 42.3% |    375 MB/s | 27,987 MB/s |
+| zstd 1 MT | 40.7% |  3,566 MB/s | 14,139 MB/s |
+| zstd 3 MT | 35.6% |  2,064 MB/s | 12,143 MB/s |
+| zstd 9 MT | 31.8% |    360 MB/s | 13,470 MB/s |
+| zstd 19 MT | 29.0% |   22.2 MB/s | 11,924 MB/s |
+| **SLZ L1**  | 58.6% |  2,789 MB/s | **31,508 MB/s** |
+| **SLZ L3**  | 56.5% |     84 MB/s | **18,243 MB/s** |
+| **SLZ L5**  | 43.4% |     40 MB/s | **10,762 MB/s** |
+| **SLZ L6**  | 31.4% |     40 MB/s |  7,567 MB/s |
+| **SLZ L8**  | 31.0% |     19 MB/s |  7,623 MB/s |
+| **SLZ L9**  | 27.4% |    7.3 MB/s |  2,058 MB/s |
+| **SLZ L11** | 25.6% |    1.3 MB/s |  1,969 MB/s |
 
-At the fast tier: SLZ L1 decompresses **3x faster** than zstd 1 MT
-(34 vs 12 GB/s) and **1.2x faster** than LZ4 MT (34 vs 29 GB/s).
+At the fast tier: SLZ L1 decompresses **2.2x faster** than zstd 1 MT
+(32 vs 14 GB/s) and **1.1x faster** than LZ4 MT (32 vs 28 GB/s).
 At the ~31% ratio tier: zstd 9 MT decompresses faster than SLZ L6
-(12 vs 8 GB/s) using 4 MB independent blocks. At the best-ratio tier:
+(13 vs 8 GB/s) using 4 MB independent blocks. At the best-ratio tier:
 SLZ L11 achieves 25.6% vs zstd 19's 29.0%.
 
 [zstd-1t]: https://github.com/facebook/zstd/issues/2470#issuecomment-759613384
