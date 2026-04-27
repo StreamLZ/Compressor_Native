@@ -1067,3 +1067,58 @@ their own regions (redundant but harmless since the pre-scatter
 already placed the correct values).
 
 **Verified**: enwik9 (1 GB) L3 parallel roundtrip now correct.
+
+---
+
+## cldemote Cache Eviction in Fast Decoder (2026-04-27)
+
+**Hypothesis**: Output bytes beyond the max back-reference distance (64KB
+for L1 u16 hash) will never be match sources again. Demoting those cache
+lines from L1/L2 to L3 via `cldemote` should free cache capacity for
+active match sources, improving decode throughput.
+
+**Implementation**: Two variants tested in `processModeImpl` hot loop:
+
+1. **Per-cache-line**: Check every iteration, fire `cldemote` when dst
+   advances past a 64-byte boundary, targeting `dst - 64KB`. Result:
+   **-21% regression** (6,464 → 5,111 MB/s). The per-token branch +
+   inline asm dominated the critical path.
+
+2. **Amortized burst**: Check once per 4KB of output (`@branchHint(.cold)`),
+   fire 64 `cldemote` instructions covering the previous 4KB stride at
+   `dst - 64KB`. Result: **-2.7% regression** (6,464 → 6,290 MB/s).
+   Lower overhead but still net negative.
+
+**Why it failed**: The decoder is **latency-bound on the match dependency
+chain**, not cache-capacity-bound. Each token's match address depends on
+the previous token's output — a serial pointer-chase that can't be
+improved by freeing cache space. VTune confirmed CPI=0.17 (instruction-
+bound). The 256KB sub-chunks fit in L2 (2MB), match sources are hot in
+L1, and L3→DRAM writeback happens asynchronously via LRU without stalling
+the CPU.
+
+A memcpy ceiling test confirmed the decoder at 6.5 GB/s is at **111% of
+the dependent-load-chase ceiling** (5.7 GB/s at 100MB working set),
+meaning literal copies running in parallel with the match chain already
+slightly exceed the pure-chase bandwidth. There is no cache-capacity
+headroom to exploit.
+
+**Also evaluated (not implemented)**:
+- **`clwb`** (write back dirty line, keep clean copy): No store-buffer
+  pressure to relieve — the decoder writes 8-16 bytes per token, well
+  within the 72-entry store buffer.
+- **Non-temporal stores for literals**: Literals and match copies
+  interleave at byte granularity within the same 64-byte cache lines.
+  Non-temporal stores operate at cache-line granularity and would evict
+  lines that subsequent match copies need to read.
+- **Two-literal-stream split (referenced vs unreferenced)**: Would
+  require format change. The encoder doesn't know at literal-write time
+  which bytes will be match sources. Would need two-pass encoding or
+  sidecar annotation.
+
+**Conclusion**: Cache management hints (`cldemote`, `clwb`, `clflush`)
+don't help LZ decoders because the access pattern is already cache-
+friendly by construction — matches read recently-written data that's
+naturally hot in L1/L2. The bottleneck is the serial match-address
+dependency chain, which is a memory-latency wall that no cache hint
+can break on a single thread.
