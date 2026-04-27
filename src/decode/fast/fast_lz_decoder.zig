@@ -394,16 +394,18 @@ fn processModeImpl(
 
     dst += start_off;
 
-    while (@intFromPtr(cmd_stream) < @intFromPtr(cmd_stream_end)) {
+    // ── Fast inner loop: no bounds checks ──
+    // Short tokens (cmd >= 24) produce at most 7 + 15 = 22 bytes.
+    // Process tokens without any dst bounds checks while safely far
+    // from the end. Non-short tokens (cmd <= 2) break to the safe path.
+    while (@intFromPtr(cmd_stream) < @intFromPtr(cmd_stream_end) and
+        @intFromPtr(dst) < @intFromPtr(dst_safe_end))
+    {
         const cmd: u32 = cmd_stream[0];
         cmd_stream += 1;
 
         if (cmd >= 24) {
             @branchHint(.likely);
-            if (@intFromPtr(dst) >= @intFromPtr(dst_safe_end)) {
-                @branchHint(.cold);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) return error.OutputTruncated;
-            }
             const new_dist: i64 = off16_stream[0];
             const literal_length: usize = cmd & 7;
             const use_new_dist: bool = (cmd & 0x80) == 0;
@@ -417,17 +419,47 @@ fn processModeImpl(
             dst += literal_length;
             lit_stream += literal_length;
 
-            // CMOV select: pick -new_dist if use_new_dist, else keep recent_offs.
-            // Shorter critical path than the 4-op XOR-mask swap: the match
-            // load can issue as soon as this select and `dst += literal_length`
-            // are both ready.
             const candidate_offs: i64 = -new_dist;
             recent_offs = if (use_new_dist) candidate_offs else recent_offs;
-
-            // Advance off16 stream by 2 bytes if we consumed new_dist.
             off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + (@as(usize, @intFromBool(use_new_dist)) * 2));
 
-            // Bounds: match source must be within dst_start.
+            const match_addr_usize: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
+            const match_ptr: [*]const u8 = @ptrFromInt(match_addr_usize);
+            copy.copy64(dst, match_ptr);
+            copy.copy64(dst + 8, match_ptr + 8);
+            dst += (cmd >> 3) & 0xF;
+        } else {
+            // Non-short token: back up and fall through to safe loop
+            cmd_stream -= 1;
+            break;
+        }
+    }
+
+    // ── Safe tail loop: full bounds checks ──
+    while (@intFromPtr(cmd_stream) < @intFromPtr(cmd_stream_end)) {
+        const cmd: u32 = cmd_stream[0];
+        cmd_stream += 1;
+
+        if (cmd >= 24) {
+            @branchHint(.likely);
+            if (@intFromPtr(dst) >= @intFromPtr(dst_end)) return error.OutputTruncated;
+            const new_dist: i64 = off16_stream[0];
+            const literal_length: usize = cmd & 7;
+            const use_new_dist: bool = (cmd & 0x80) == 0;
+
+            if (is_delta) {
+                const delta_src: [*]const u8 = ptr_math.offsetPtr([*]const u8, dst, @as(isize, @intCast(recent_offs)));
+                copy.copy64Add(dst, lit_stream, delta_src);
+            } else {
+                copy.copy64(dst, lit_stream);
+            }
+            dst += literal_length;
+            lit_stream += literal_length;
+
+            const candidate_offs: i64 = -new_dist;
+            recent_offs = if (use_new_dist) candidate_offs else recent_offs;
+            off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + (@as(usize, @intFromBool(use_new_dist)) * 2));
+
             const match_addr_usize: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
             if (match_addr_usize < @intFromPtr(dst_start)) return error.MatchOutOfBounds;
             const match_ptr: [*]const u8 = @ptrFromInt(match_addr_usize);
