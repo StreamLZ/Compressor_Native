@@ -373,7 +373,7 @@ pub fn compressFramedOne(
     // where `maxHashBits = level switch { -3=>13, -2=>14, -1=>16, 0|1=>17, 2=>19, _ => adaptive }`.
     const engine_level_cap: u6 = switch (resolved.engine_level) {
         -3 => 13,
-        -2 => 14,
+        -2 => 17,
         -1 => 16,
         0, 1 => 17,
         2 => 19,
