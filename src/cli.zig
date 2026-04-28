@@ -16,6 +16,8 @@ const lz4 = @import("compare/lz4.zig");
 
 const forward_lz = @import("encode/forward_lz.zig");
 
+const mmap_helpers = @import("platform/mmap.zig");
+
 const Mode = enum {
     compress,
     decompress,
@@ -503,11 +505,10 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
 
-    const src = readFile(allocator, in_path, w);
-    defer allocator.free(src);
-
-    // zstd/lz4 decompress: compress first (to produce blocks), then decompress.
+    // zstd/lz4 path: unchanged (uses heap alloc)
     if (args.engine != .slz) {
+        const src = readFile(allocator, in_path, w);
+        defer allocator.free(src);
         const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
         const level: c_int = @intCast(args.level);
 
@@ -549,6 +550,37 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
         return;
     }
 
+    // ── SLZ decompress: mmap input, mmap output ──
+
+    // Open + mmap input file (read-only)
+    const in_file = std.fs.cwd().openFile(in_path, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ in_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_file.close();
+
+    const in_size = in_file.getEndPos() catch |err| {
+        try w.print("error: cannot stat '{s}': {s}\n", .{ in_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    if (in_size == 0) {
+        try w.writeAll("error: input file is empty\n");
+        try w.flush();
+        std.process.exit(1);
+    }
+
+    var in_map = mmap_helpers.mapFileRead(in_file, in_size) orelse {
+        try w.writeAll("error: cannot memory-map input file\n");
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_map.unmap();
+
+    const src = in_map.sliceConst();
+
+    // Parse frame header to get content size
     const hdr = frame.parseHeader(src) catch |err| {
         try w.print("error: not a valid SLZ1 frame: {s}\n", .{@errorName(err)});
         try w.flush();
@@ -565,33 +597,54 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
         if (dict_mod.findById(did)) |d| d.data.len + decoder.safe_space else 0
     else
         0;
-    const dst = allocator.alloc(u8, content_size + decoder.safe_space + dict_overhead) catch |err| {
-        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ content_size + decoder.safe_space + dict_overhead, @errorName(err) });
-        try w.flush();
-        std.process.exit(1);
-    };
-    defer allocator.free(dst);
-
-    const dec_result = decoder.decompressFramedParallelThreaded(allocator, src, dst, args.threads) catch |err| {
-        try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
-        try w.flush();
-        std.process.exit(1);
-    };
-    const written = dec_result.written;
+    const out_size: usize = content_size + decoder.safe_space + dict_overhead;
 
     // Derive output path
     const out_path_owned = if (args.output) |_| @as(?[]const u8, null) else try deriveDecompressOutput(allocator, in_path);
     defer if (out_path_owned) |o| allocator.free(o);
     const out_path = args.output orelse out_path_owned.?;
 
-    const out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+    // Create output file, pre-size it, and mmap for direct decompress.
+    const out_file = std.fs.cwd().createFile(out_path, .{ .read = true }) catch |err| {
         try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
     defer out_file.close();
-    out_file.writeAll(dst[dec_result.offset..][0..written]) catch |err| {
-        try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
+
+    out_file.setEndPos(out_size) catch |err| {
+        try w.print("error: cannot pre-size output file: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    var out_map = mmap_helpers.mapFileReadWrite(out_file, out_size) orelse {
+        try w.writeAll("error: cannot memory-map output file\n");
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const dst = out_map.slice();
+
+    const dec_result = decoder.decompressFramedParallelThreaded(allocator, src, dst, args.threads) catch |err| {
+        out_map.unmap();
+        try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+    const written = dec_result.written;
+
+    // Shift content past the dictionary prefix (if any) to file offset 0.
+    if (dec_result.offset > 0) {
+        const content = dst[dec_result.offset..][0..written];
+        std.mem.copyForwards(u8, dst[0..written], content);
+    }
+
+    out_map.unmap();
+
+    // Truncate to exact decompressed size.
+    out_file.setEndPos(written) catch |err| {
+        try w.print("error: cannot truncate output: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
     };
