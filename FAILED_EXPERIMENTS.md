@@ -1122,3 +1122,100 @@ friendly by construction — matches read recently-written data that's
 naturally hot in L1/L2. The bottleneck is the serial match-address
 dependency chain, which is a memory-latency wall that no cache hint
 can break on a single thread.
+
+---
+
+## Fast Decoder: Input Stream Prefetch (2026-04-27)
+
+**Hypothesis**: The decoder reads from 4 separate input streams (cmd,
+literal, off16, off32) in different memory regions. The hardware
+prefetcher tracks one linear scan well but may struggle with 4+
+concurrent streams. Explicit `@prefetch` ahead on cmd, literal, and
+off16 streams could improve L1 hit rate.
+
+**Implementation**: Added `@prefetch(cmd_stream + 64)`,
+`@prefetch(lit_stream + 128)`, `@prefetch(off16_stream + 64)` at the
+top of each loop iteration with locality=3 (keep in all cache levels).
+
+**Result**: No change (6,471 vs 6,464 MB/s baseline). Within noise.
+
+**Why it failed**: VTune shows 99.9% L1 hit rate on input loads — the
+hardware prefetcher already tracks the sequential streams perfectly.
+The streams are accessed linearly and the prefetcher detects the stride
+pattern. Explicit prefetch adds 3 instructions per token with zero
+benefit.
+
+---
+
+## Fast Decoder: Counted Loop Instead of Pointer Compare (2026-04-27)
+
+**Hypothesis**: Replacing the `while (cmd_stream < cmd_stream_end)` pointer
+comparison with a counted `while (cmd_idx < cmd_count)` index loop
+could eliminate the pointer compare in favor of a simpler integer compare.
+
+**Implementation**: Pre-computed `cmd_count = cmd_end - cmd_start`, used
+indexed addressing `cmd_stream[cmd_idx]` instead of pointer increment.
+
+**Result**: No change (6,695 vs 6,760 MB/s). Within noise, possibly
+slightly worse.
+
+**Why it failed**: LLVM already fuses the pointer `cmp` + `jb` into a
+single µop. The counted loop replaces this with `cmp` + `jb` on an
+integer (same cost) but adds indexed addressing overhead (`base + index`
+addressing mode vs simple pointer deref). Net neutral or slightly worse
+due to the extra register for the index.
+
+---
+
+## Fast Decoder: Pipelined Match Source Prefetch (2026-04-27)
+
+**Hypothesis**: The match-address dependency chain (cmd load → offset
+resolve → CMOV → address compute → match load) is 7 cycles. By peeking
+at the NEXT token at the end of each iteration and prefetching its
+probable match source, the next iteration's match load would find the
+data already in L1, hiding the dependency latency.
+
+**Implementation**: At the end of each fast-path iteration, peek at
+`cmd_stream[0]` (next token), load the next off16 entry, compute the
+speculative match address including the next literal length offset,
+and issue `@prefetch` on the result.
+
+**Result**: -2.8% regression (6,570 vs 6,760 MB/s).
+
+**Why it failed**: VTune shows **99.9% L1 hit rate** on match loads.
+Match data is already in L1 because it's recently-written output — the
+decoder just wrote those bytes a few tokens ago. There is no cache miss
+to hide. The prefetch block adds ~10 instructions per token (peek, branch,
+load, CMOV, add, compute address, prefetch) which increases instruction
+pressure at CPI 0.188 where the pipeline is already saturated. The 17%
+"bound on loads" from VTune is from the **data dependency chain**, not
+from cache misses — prefetching cannot fix data dependencies.
+
+---
+
+## Fast Decoder: CMOV Elimination for Recent Offset (2026-04-27)
+
+**Evaluated but not implemented.** Analysis showed no benefit possible.
+
+The current code uses a branchless CMOV to select between the new offset
+and the recent offset: `recent_offs = if (use_new_dist) candidate else recent`.
+The speculative off16 load, CMOV, and conditional pointer advance are all
+single-cycle branchless operations.
+
+To truly eliminate the CMOV, the encoder would need to emit an offset for
+EVERY token (including recent-offset ones). But recent offsets can be any
+size (they may have originated from the off32 path), so they can't be
+stuffed into the u16 off16 stream. This would require a format redesign
+that inflates the compressed off16 stream by 30-40%.
+
+Critical path analysis shows the CMOV adds exactly 1 cycle vs an
+unconditional approach, but the unconditional approach requires the same
+number of instructions (load + negate vs CMOV). Net zero benefit for a
+significant format change.
+
+**Conclusion**: At CPI 0.188 with 99.9% L1 hit rate, 0.16% branch
+mispredict rate, and 93% LSD (loop stream detector) decode, the Fast
+decoder hot loop is at the hardware wall. The remaining bottlenecks are
+the serial match-address dependency chain (17% of cycles) and unaligned
+cache-line-crossing accesses (10% of cycles), both inherent to the LZ
+token format. Further gains require format-level changes.
