@@ -30,22 +30,24 @@ pub fn build(b: *std.Build) void {
     // (VTune, samply, etc.) can attribute samples to source lines.
     const strip = b.option(bool, "strip", "Strip debug symbols (default: optimize-mode default)");
 
+    const bench = b.option(bool, "bench", "Include zstd/lz4 vendor libs for -bc comparison benchmark (default: false)") orelse false;
+
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip,
     });
+    const bench_option = b.addOptions();
+    bench_option.addOption(bool, "enable_bench", bench);
+    root_module.addOptions("build_options", bench_option);
 
     const exe = b.addExecutable(.{
         .name = "streamlz",
         .root_module = root_module,
     });
-    // Link libc so std.heap.c_allocator is available — used by the
-    // decoder's per-chunk token-array fallback (matches C#'s
-    // NativeMemory.Alloc, ~100x faster than page_allocator).
     exe.linkLibC();
-    addVendorLibs(b, exe);
+    if (bench) addVendorLibs(b, exe);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);

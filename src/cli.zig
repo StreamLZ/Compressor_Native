@@ -11,8 +11,10 @@ const version_string = "0.0.0-phase3a";
 
 const trainer = @import("dict/trainer.zig");
 
-const zstd = @import("compare/zstd.zig");
-const lz4 = @import("compare/lz4.zig");
+const build_options = @import("build_options");
+const enable_bench = build_options.enable_bench;
+const zstd = if (enable_bench) @import("compare/zstd.zig") else struct {};
+const lz4 = if (enable_bench) @import("compare/lz4.zig") else struct {};
 
 const forward_lz = @import("encode/forward_lz.zig");
 
@@ -231,8 +233,16 @@ pub fn run() !void {
         .bench => try runBenchCompress(allocator, w, args),
         .bench_decompress => try runBenchDecompress(allocator, w, args),
         .bench_all => try runBenchAll(allocator, w, args),
-        .bench_compare => try runBenchCompare(allocator, w, args, false),
-        .bench_compare_fast => try runBenchCompare(allocator, w, args, true),
+        .bench_compare => if (enable_bench) try runBenchCompare(allocator, w, args, false) else {
+            try w.writeAll("error: -bc requires building with -Dbench=true\n");
+            try w.flush();
+            std.process.exit(2);
+        },
+        .bench_compare_fast => if (enable_bench) try runBenchCompare(allocator, w, args, true) else {
+            try w.writeAll("error: -bfast requires building with -Dbench=true\n");
+            try w.flush();
+            std.process.exit(2);
+        },
         .forward_analyze => try runForwardAnalyze(allocator, w, args),
         .info => try runInfo(allocator, w, args),
         .train => try runTrain(allocator, w, args),
@@ -388,8 +398,12 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         std.process.exit(2);
     }
 
-    // zstd/lz4 path: unchanged (uses heap alloc, no file output)
     if (args.engine != .slz) {
+        if (!enable_bench) {
+            try w.writeAll("error: zstd/lz4 engines require building with -Dbench=true\n");
+            try w.flush();
+            std.process.exit(2);
+        }
         const src = readFile(allocator, in_path, w);
         defer allocator.free(src);
         const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
@@ -543,8 +557,12 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
 
-    // zstd/lz4 path: unchanged (uses heap alloc)
     if (args.engine != .slz) {
+        if (!enable_bench) {
+            try w.writeAll("error: zstd/lz4 engines require building with -Dbench=true\n");
+            try w.flush();
+            std.process.exit(2);
+        }
         const src = readFile(allocator, in_path, w);
         defer allocator.free(src);
         const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
