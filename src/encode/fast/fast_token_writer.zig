@@ -259,11 +259,12 @@ pub inline fn writeOffset(
 ) void {
     if (literal_run_length <= 7 and match_length <= 15 and offset <= 0xFFFF) {
         @branchHint(.likely);
-        // Fast path — single copy64, single token store, conditional u16 store.
+        // Fast path — fixed-stride writes: literal copy, token, offset.
+        // All writes are unconditional; off16 gets a dummy on reuse
+        // that the assembly step skips via the flag bit.
         copy.copy64(w.literal_cursor, literal_start);
         w.literal_cursor += literal_run_length;
         if (w.delta_literal_cursor) |delta_cur| {
-            // SIMD byte subtract: delta[i] = literal[i] - byte_at_recent_offset[i]
             const V8 = @Vector(8, u8);
             const a: V8 = literal_start[0..8].*;
             const back_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, literal_start, recent_offset);
@@ -278,10 +279,11 @@ pub inline fn writeOffset(
         w.token_cursor[0] = use_distance_bit + token;
         w.token_cursor += 1;
 
-        if (offset != 0) {
-            w.off16_cursor[0] = @intCast(offset);
-            w.off16_cursor += 1;
-        }
+        // Always write offset — unconditional store eliminates branch.
+        // off16 stream has a dummy value when reuse flag (0x80) is set;
+        // assembly skips these entries by checking the cmd stream flag.
+        w.off16_cursor[0] = @intCast(offset);
+        w.off16_cursor += @as(usize, @intFromBool(offset != 0));
         return;
     }
     writeComplexOffset(w, match_length, literal_run_length, offset, recent_offset, literal_start);
