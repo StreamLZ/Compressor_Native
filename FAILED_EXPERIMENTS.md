@@ -1219,3 +1219,34 @@ decoder hot loop is at the hardware wall. The remaining bottlenecks are
 the serial match-address dependency chain (17% of cycles) and unaligned
 cache-line-crossing accesses (10% of cycles), both inherent to the LZ
 token format. Further gains require format-level changes.
+
+---
+
+## Fast Decoder: Pre-scan Safe Limit to Eliminate dst Check (2026-04-27)
+
+**Hypothesis**: The fast inner loop has two conditions per iteration:
+`cmd_stream < cmd_stream_end` and `dst < dst_safe_end`. Pre-scanning
+the decoded cmd stream to compute a `cmd_safe_end` pointer (where all
+tokens are short AND cumulative output fits within dst_safe_end) would
+reduce the loop to a single pointer compare, eliminating both the dst
+check and the `cmd >= 24` check.
+
+**Implementation**: Before the hot loop, scan the cmd stream counting
+consecutive short tokens (cmd >= 24) with a pessimistic 22-byte-per-
+token output budget. Produce a `cmd_safe_end` pointer. Inner loop uses
+`while (cmd_stream < cmd_safe_end)` with no other checks.
+
+**Result**: -1.6% regression (best 6,722 vs 6,828 MB/s over 500 runs).
+
+**Why it failed**: The pre-scan adds ~5KB of sequential reads over the
+cmd stream before the hot loop begins. More importantly, LLVM generates
+slightly inferior code for the single-check loop body compared to the
+two-check version — the two-condition `while (A and B)` compiles to a
+fused compare-and-branch pair that the branch predictor handles
+perfectly (both conditions are true ~99.8% of iterations). The pre-scan
+overhead exceeds the savings from eliminating one check.
+
+Also tested a counted-index variant (`while (i < safe_short_count)`)
+which was even worse due to indexed addressing overhead vs pointer
+increment. LLVM strongly prefers pointer iteration over index iteration
+for this loop shape.
