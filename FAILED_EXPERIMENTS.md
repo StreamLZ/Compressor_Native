@@ -1250,3 +1250,27 @@ Also tested a counted-index variant (`while (i < safe_short_count)`)
 which was even worse due to indexed addressing overhead vs pointer
 increment. LLVM strongly prefers pointer iteration over index iteration
 for this loop shape.
+
+---
+
+## Fast Decoder: Removing Far-Offset Prefetch (2026-04-27)
+
+**Hypothesis**: The two `@prefetch(match_ptr)` instructions on far-offset
+match paths (off32, distance > 65536) fire on cold paths (~5-8% of
+tokens). VTune showed 0 L3 misses, suggesting far matches already hit
+L2/L3 without prefetch. Removing them would eliminate the branch +
+prefetch instruction overhead.
+
+**Result**: Neutral across all tests (100-500 runs, L1/L3, enwik8/enwik9):
+
+| Test | With prefetch | Without | Delta |
+|------|-------------|---------|-------|
+| L1 enwik8 r100 | 6,810 best | 6,741 best | -1.0% |
+| L3 enwik8 r100 | 6,590 best | 6,622 best | +0.5% |
+| L1 enwik9 r30 | 6,847 best | 6,800 best | -0.7% |
+
+All within 1% noise. The prefetch fires so rarely (cold path, branch-
+hinted) that its presence or absence doesn't measurably affect the hot
+loop. Keeping the prefetch is correct — zero cost on small/medium files
+and provides insurance on large working sets where far matches might
+miss L2.
