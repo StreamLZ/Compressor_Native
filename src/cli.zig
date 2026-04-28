@@ -388,26 +388,84 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         std.process.exit(2);
     }
 
-    const src = readFile(allocator, in_path, w);
-    defer allocator.free(src);
+    // zstd/lz4 path: unchanged (uses heap alloc, no file output)
+    if (args.engine != .slz) {
+        const src = readFile(allocator, in_path, w);
+        defer allocator.free(src);
+        const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
 
-    // Derive output path
-    const out_path_owned = if (args.output) |o| blk: {
-        _ = o;
-        break :blk @as(?[]const u8, null);
-    } else try deriveCompressOutput(allocator, in_path);
-    defer if (out_path_owned) |o| allocator.free(o);
-    const out_path = args.output orelse out_path_owned.?;
+        switch (args.engine) {
+            .zstd_engine => {
+                var result = zstd.compressBlocksMt(allocator, src, threads, @intCast(level)) catch |err| {
+                    try w.print("error: zstd compression failed: {s}\n", .{@errorName(err)});
+                    try w.flush();
+                    std.process.exit(1);
+                };
+                defer result.deinit();
+                try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  zstd {d} MT  ({s})\n", .{
+                    src.len,
+                    result.total_compressed,
+                    @as(f64, @floatFromInt(result.total_compressed)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
+                    level,
+                    in_path,
+                });
+            },
+            .lz4_engine => {
+                const hc_level: ?c_int = if (level > 1) @intCast(level) else null;
+                var result = lz4.compressMt(allocator, src, threads, hc_level) catch |err| {
+                    try w.print("error: lz4 compression failed: {s}\n", .{@errorName(err)});
+                    try w.flush();
+                    std.process.exit(1);
+                };
+                defer result.deinit();
+                try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  LZ4{s} MT  ({s})\n", .{
+                    src.len,
+                    result.total_compressed,
+                    @as(f64, @floatFromInt(result.total_compressed)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
+                    if (hc_level != null) " HC" else "",
+                    in_path,
+                });
+            },
+            .slz => unreachable,
+        }
+        return;
+    }
 
-    const bound = encoder.compressBound(src.len);
-    const dst = allocator.alloc(u8, bound) catch |err| {
-        try w.print("error: cannot allocate {d} bytes: {s}\n", .{ bound, @errorName(err) });
+    // ── SLZ compress: mmap input, mmap output ──
+
+    const in_file = std.fs.cwd().openFile(in_path, .{}) catch |err| {
+        try w.print("error: cannot open '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer allocator.free(dst);
+    defer in_file.close();
 
-    // Dictionary resolution: explicit -D flag, or auto-detect by extension.
+    const in_size = in_file.getEndPos() catch |err| {
+        try w.print("error: cannot stat '{s}': {s}\n", .{ in_path, @errorName(err) });
+        try w.flush();
+        std.process.exit(1);
+    };
+    if (in_size == 0) {
+        try w.writeAll("error: input file is empty\n");
+        try w.flush();
+        std.process.exit(1);
+    }
+
+    var in_map = mmap_helpers.mapFileRead(in_file, in_size) orelse {
+        try w.writeAll("error: cannot memory-map input file\n");
+        try w.flush();
+        std.process.exit(1);
+    };
+    defer in_map.unmap();
+
+    const src = in_map.sliceConst();
+
+    // Derive output path
+    const out_path_owned = if (args.output) |_| @as(?[]const u8, null) else try deriveCompressOutput(allocator, in_path);
+    defer if (out_path_owned) |o| allocator.free(o);
+    const out_path = args.output orelse out_path_owned.?;
+
+    // Dictionary resolution
     var dict_data: ?[]const u8 = null;
     var dict_id: ?u32 = null;
     if (args.dict_name) |name| {
@@ -428,68 +486,48 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         }
     }
 
-    // Dispatch to the selected engine.
     const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
-    var written: usize = 0;
+    const bound = encoder.compressBound(src.len);
 
-    switch (args.engine) {
-        .zstd_engine => {
-            var result = zstd.compressBlocksMt(allocator, src, threads, @intCast(level)) catch |err| {
-                try w.print("error: zstd compression failed: {s}\n", .{@errorName(err)});
-                try w.flush();
-                std.process.exit(1);
-            };
-            defer result.deinit();
-            written = result.total_compressed;
-            try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  zstd {d} MT  ({s})\n", .{
-                src.len,
-                written,
-                @as(f64, @floatFromInt(written)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
-                level,
-                in_path,
-            });
-            return;
-        },
-        .lz4_engine => {
-            const hc_level: ?c_int = if (level > 1) @intCast(level) else null;
-            var result = lz4.compressMt(allocator, src, threads, hc_level) catch |err| {
-                try w.print("error: lz4 compression failed: {s}\n", .{@errorName(err)});
-                try w.flush();
-                std.process.exit(1);
-            };
-            defer result.deinit();
-            written = result.total_compressed;
-            try w.print("compressed {d} -> {d} bytes  ({d:.1}%)  LZ4{s} MT  ({s})\n", .{
-                src.len,
-                written,
-                @as(f64, @floatFromInt(written)) / @as(f64, @floatFromInt(@max(src.len, 1))) * 100.0,
-                if (hc_level != null) " HC" else "",
-                in_path,
-            });
-            return;
-        },
-        .slz => {},
-    }
-
-    written = encoder.compressFramed(allocator, src, dst, .{
-        .level = level,
-        .num_threads = @intCast(threads),
-        .dictionary = dict_data,
-        .dictionary_id = dict_id,
-    }) catch |err| {
-        try w.print("error: compression failed: {s}\n", .{@errorName(err)});
-        try w.flush();
-        std.process.exit(1);
-    };
-
-    const out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+    // Create output file, pre-size to compress bound, mmap for direct write.
+    const out_file = std.fs.cwd().createFile(out_path, .{ .read = true }) catch |err| {
         try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
     defer out_file.close();
-    out_file.writeAll(dst[0..written]) catch |err| {
-        try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
+
+    out_file.setEndPos(bound) catch |err| {
+        try w.print("error: cannot pre-size output file: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    var out_map = mmap_helpers.mapFileReadWrite(out_file, bound) orelse {
+        try w.writeAll("error: cannot memory-map output file\n");
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    const dst = out_map.slice();
+
+    const written = encoder.compressFramed(allocator, src, dst, .{
+        .level = level,
+        .num_threads = @intCast(threads),
+        .dictionary = dict_data,
+        .dictionary_id = dict_id,
+    }) catch |err| {
+        out_map.unmap();
+        try w.print("error: compression failed: {s}\n", .{@errorName(err)});
+        try w.flush();
+        std.process.exit(1);
+    };
+
+    out_map.unmap();
+
+    // Truncate to actual compressed size.
+    out_file.setEndPos(written) catch |err| {
+        try w.print("error: cannot truncate output: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
     };
