@@ -109,12 +109,22 @@ pub fn build(b: *std.Build) void {
 }
 
 fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
+    const target = exe.root_module.resolved_target.?;
+    const optimize = exe.root_module.optimize.?;
+
     const c_flags = &.{ "-DXXH_NAMESPACE=ZSTD_", "-DZSTD_DISABLE_ASM", "-DZSTD_MULTITHREAD" };
 
-    // ---- zstd (v1.5.7) ----
-    exe.addIncludePath(b.path("vendor/zstd"));
-    exe.addIncludePath(b.path("vendor/zstd/common"));
-    exe.addCSourceFiles(.{ .files = &.{
+    // ---- zstd (v1.5.7) — precompiled static library ----
+    const zstd_mod = b.createModule(.{ .target = target, .optimize = optimize });
+    const zstd_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zstd",
+        .root_module = zstd_mod,
+    });
+    zstd_lib.linkLibC();
+    zstd_lib.addIncludePath(b.path("vendor/zstd"));
+    zstd_lib.addIncludePath(b.path("vendor/zstd/common"));
+    zstd_lib.addCSourceFiles(.{ .files = &.{
         "vendor/zstd/common/debug.c",
         "vendor/zstd/common/entropy_common.c",
         "vendor/zstd/common/error_private.c",
@@ -143,10 +153,24 @@ fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
         "vendor/zstd/decompress/zstd_decompress_block.c",
     }, .flags = c_flags });
 
-    // ---- LZ4 (v1.10.0) ----
-    exe.addIncludePath(b.path("vendor/lz4"));
-    exe.addCSourceFiles(.{ .files = &.{
+    // ---- LZ4 (v1.10.0) — precompiled static library ----
+    const lz4_mod = b.createModule(.{ .target = target, .optimize = optimize });
+    const lz4_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "lz4",
+        .root_module = lz4_mod,
+    });
+    lz4_lib.linkLibC();
+    lz4_lib.addIncludePath(b.path("vendor/lz4"));
+    lz4_lib.addCSourceFiles(.{ .files = &.{
         "vendor/lz4/lz4.c",
         "vendor/lz4/lz4hc.c",
     }, .flags = &.{} });
+
+    // Link the precompiled libs + expose include paths to the exe
+    exe.addIncludePath(b.path("vendor/zstd"));
+    exe.addIncludePath(b.path("vendor/zstd/common"));
+    exe.addIncludePath(b.path("vendor/lz4"));
+    exe.linkLibrary(zstd_lib);
+    exe.linkLibrary(lz4_lib);
 }
