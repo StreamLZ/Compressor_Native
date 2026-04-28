@@ -78,8 +78,7 @@ pub fn runGreedyParser(
     // Parser-local recent offset (signed negative distance).
     var recent_offset: isize = recent_offset_inout.*;
 
-    const skip_factor: u6 = if (level <= -3) 3 else if (level <= 1) 4 else 5;
-    var skip_accumulator: u32 = @as(u32, 1) << skip_factor;
+    _ = comptime if (level <= -3) 3 else if (level <= 1) 4 else 5;
 
     var source_cursor: [*]const u8 = source_cursor_in;
     var literal_start: [*]const u8 = source_cursor_in;
@@ -191,19 +190,10 @@ pub fn runGreedyParser(
 
         if (!found_match) {
             @branchHint(.unlikely);
-            const step: u32 = skip_accumulator >> skip_factor;
+            const dist: usize = @intFromPtr(source_cursor) - @intFromPtr(literal_start);
+            const step: usize = if (dist < 128) 1 else @min((dist >> 7) + 1, 16);
             const remaining: usize = @intFromPtr(safe_source_end) - 5 - @intFromPtr(source_cursor);
             if (remaining <= step) break :outer;
-
-            if (comptime level >= -2) {
-                skip_accumulator += 1;
-            } else {
-                const run_len: usize = @intFromPtr(source_cursor) - @intFromPtr(literal_start);
-                const grow: u32 = @intCast(@min(run_len >> 1, 296));
-                const sum: u32 = skip_accumulator + grow;
-                skip_accumulator = @min(sum, @as(u32, 296));
-            }
-
             source_cursor += step;
             continue :outer;
         }
@@ -249,7 +239,6 @@ pub fn runGreedyParser(
 
         literal_start = match_end;
         source_cursor = match_end;
-        skip_accumulator = @as(u32, 1) << skip_factor;
         recent_offset = current_offset;
 
         if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) break :outer;
