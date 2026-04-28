@@ -111,16 +111,25 @@ pub fn runGreedyParser(
         hash_table[hash_index] = cur_pos_t;
 
         // Recent-offset candidate.
-        const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
-        const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
-        const xor_value: u32 = bytes_at_cursor ^ recent_word;
+        // Guard: the recent-offset source must be within the window.
+        // In SC mode window_base == chunk_start, so this prevents
+        // cross-chunk matches at the start of each chunk.
+        const recent_abs: usize = if (recent_offset < 0) @intCast(-recent_offset) else @intCast(recent_offset);
+        const can_use_recent: bool = cur_pos_in_window >= recent_abs;
+
+        var xor_value: u32 = 0;
+        if (can_use_recent) {
+            const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
+            const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
+            xor_value = bytes_at_cursor ^ recent_word;
+        }
 
         var found_match = false;
         var offset_or_recent: u32 = 0;
         var current_offset: isize = 0;
         var match_end: [*]const u8 = undefined;
 
-        if ((xor_value & 0xFFFFFF00) == 0) {
+        if (can_use_recent and (xor_value & 0xFFFFFF00) == 0) {
             @branchHint(.likely);
             // 1-byte literal + at least 3-byte recent match.
             source_cursor += 1;
@@ -172,8 +181,8 @@ pub fn runGreedyParser(
                 }
             }
 
-            // Fallback: offset-8 match.
-            if (!found_match) {
+            // Fallback: offset-8 match (guarded by window bounds).
+            if (!found_match and cur_pos_in_window >= 8) {
                 const off8_src_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% 8);
                 const off8_word: u32 = std.mem.readInt(u32, off8_src_ptr[0..4], .little);
                 if (bytes_at_cursor == off8_word) {
@@ -186,7 +195,7 @@ pub fn runGreedyParser(
 
             // Level ≥ 2: try 2/3-byte recent match when the first 2 bytes match.
             if (comptime level >= 2) {
-                if (!found_match and (xor_value & 0xFFFF) == 0) {
+                if (!found_match and can_use_recent and (xor_value & 0xFFFF) == 0) {
                     offset_or_recent = 0;
                     current_offset = recent_offset;
                     const extra: usize = if ((xor_value & 0xFFFFFF) == 0) 3 else 2;
