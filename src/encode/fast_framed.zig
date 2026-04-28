@@ -60,7 +60,7 @@ const FastScShared = struct {
 };
 
 fn fastScWorkerFn(shared: *FastScShared) void {
-    var hasher = FastMatchHasher(u16).init(std.heap.c_allocator, .{
+    var hasher = FastMatchHasher(u32).init(std.heap.c_allocator, .{
         .hash_bits = shared.greedy_hash_bits,
         .min_match_length = shared.hasher_min_match_length,
     }) catch {
@@ -148,7 +148,7 @@ fn fastScWorkerFn(shared: *FastScShared) void {
                 const start_pos = src_off + sub_off;
 
                 const result = (switch (shared.level) {
-                    1 => fast_enc.encodeSubChunkRaw(-2, u16, std.heap.c_allocator, &hasher, sub_src, window_base_ptr, out[sub_payload_start..], start_pos, shared.parser_config),
+                    1 => fast_enc.encodeSubChunkRaw(-2, u32, std.heap.c_allocator, &hasher, sub_src, window_base_ptr, out[sub_payload_start..], start_pos, shared.parser_config),
                     else => unreachable,
                 }) catch {
                     _ = shared.error_flag.store(1, .monotonic);
@@ -387,22 +387,12 @@ pub fn compressFramedOne(
     //   engine level ∈ {-1,1,2} → FastMatchHasher<uint>   (user L2, L3, L4)
     //   engine level == 4  → MatchHasher2 chain hasher (user L5)
     // Slz.MapLevel skips Fast 4 entirely, so no MatchHasher2x bucket.
-    var greedy_hasher_u16: ?FastMatchHasher(u16) = null;
-    defer if (greedy_hasher_u16) |*h| h.deinit();
     var greedy_hasher_u32: ?FastMatchHasher(u32) = null;
     defer if (greedy_hasher_u32) |*h| h.deinit();
     var chain_hasher: ?MatchHasher2 = null;
     defer if (chain_hasher) |*h| h.deinit();
 
     switch (opts.level) {
-        1 => {
-            // Fast 1 (engine -2): u16 hash table, 14-bit cap. Hasher gets
-            // the text-bumped min_match_length (affects hash multiplier).
-            greedy_hasher_u16 = FastMatchHasher(u16).init(allocator, .{
-                .hash_bits = greedy_hash_bits,
-                .min_match_length = resolved.hasher_min_match_length,
-            }) catch |err| return if (err == error.HashBitsOutOfRange) error.BadLevel else @errorCast(err);
-        },
         5 => {
             // Fast 6 (engine 4): lazy chain hasher with lazy-2 evaluation.
             chain_hasher = try MatchHasher2.init(allocator, resolved.hash_bits);
@@ -436,7 +426,7 @@ pub fn compressFramedOne(
     // WHOLE-INPUT coordinates (measured from src.ptr). Stale entries from
     // sub-chunk N−1 read during sub-chunk N give huge offsets that fail
     // the `offset <= cursor - source_block_base` bound check.
-    if (greedy_hasher_u16) |*h| h.reset();
+    if (greedy_hasher_u32) |*h| h.reset();
     if (greedy_hasher_u32) |*h| h.reset();
     if (chain_hasher) |*h| {
         h.reset();
@@ -447,7 +437,7 @@ pub fn compressFramedOne(
     // Pre-fill hashers with dictionary positions so the first chunk
     // can find matches against dictionary content.
     if (dict_len > 0) {
-        if (greedy_hasher_u16) |*h| {
+        if (greedy_hasher_u32) |*h| {
             h.preloadDictionary(effective_src.ptr, dict_len);
         }
         if (greedy_hasher_u32) |*h| {
@@ -537,7 +527,7 @@ pub fn compressFramedOne(
         // Reset the hasher at every block boundary, set window_base to the
         // current block's start. Non-SC keeps the whole-input window (phase 10j).
         if (self_contained) {
-            if (greedy_hasher_u16) |*h| h.reset();
+            if (greedy_hasher_u32) |*h| h.reset();
             if (greedy_hasher_u32) |*h| h.reset();
             if (chain_hasher) |*h| {
                 h.reset();
@@ -623,7 +613,7 @@ pub fn compressFramedOne(
                 const start_position_for_sub: usize = src_off + sub_off;
                 const entropy_options = entropyOptionsForLevel(opts.level);
                 const result = try switch (opts.level) {
-                    1 => fast_enc.encodeSubChunkRaw(-2, u16, allocator, &greedy_hasher_u16.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
+                    1 => fast_enc.encodeSubChunkRaw(-2, u32, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
                     2 => fast_enc.encodeSubChunkRaw(-1, u32, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, parser_config),
                     3 => fast_enc.encodeSubChunkEntropy(1, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),
                     4 => fast_enc.encodeSubChunkEntropy(2, allocator, &greedy_hasher_u32.?, sub_src, window_base_ptr, dst[sub_payload_start..], start_position_for_sub, entropy_options, parser_config),

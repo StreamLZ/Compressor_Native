@@ -65,7 +65,7 @@ pub fn runGreedyParser(
     safe_source_end: [*]const u8,
     source_end: [*]const u8,
     recent_offset_inout: *isize,
-    dictionary_size: u32,
+    _: u32,
     min_match_length_table: *const [32]u32,
     source_block_base: [*]const u8,
     window_base: [*]const u8,
@@ -91,98 +91,82 @@ pub fn runGreedyParser(
         return;
     }
 
+    // Prologue: advance past positions where recent-offset would read
+    // before window_base. Populates the hash table but skips match
+    // attempts. Only matters at the start of SC chunks (first ~8 bytes).
+    {
+        const recent_abs: usize = if (recent_offset < 0) @intCast(-recent_offset) else @intCast(recent_offset);
+        while (@intFromPtr(source_cursor) - @intFromPtr(window_base) < recent_abs) {
+            if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) {
+                token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
+                recent_offset_inout.* = recent_offset;
+                return;
+            }
+            const word: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
+            const hi: usize = @intCast((word *% hash_mult) >> hash_shift);
+            const pos: T = @truncate(@intFromPtr(source_cursor) - @intFromPtr(window_base));
+            hash_table[hi] = pos;
+            source_cursor += 1;
+        }
+    }
+
     outer: while (true) {
         const bytes_at_cursor: u32 = std.mem.readInt(u32, source_cursor[0..4], .little);
         const word_at_cursor: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
         const hash_index: usize = @intCast((word_at_cursor *% hash_mult) >> hash_shift);
-        // `stored_pos` is a position TRUNCATED to T's width (u16 or u32). The
-        // offset is computed as `(cur_pos_T - stored_pos_T)` with wrap-around
-        // mod 2^width. For
-        // T=u16 this means offsets > 65535 collapse into apparent small
-        // offsets and get filtered by the byte comparison below.
         const stored_pos_t: T = hash_table[hash_index];
 
-        // Storage coordinate: position within the WHOLE input (measured
-        // from window_base). Bound coordinate: position within the
-        // current SUB-CHUNK (measured from source_block_base).
         const cur_pos_in_window: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
-        const cur_pos_in_block: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
         const cur_pos_t: T = @truncate(cur_pos_in_window);
         hash_table[hash_index] = cur_pos_t;
 
-        // Recent-offset candidate.
-        // Guard: the recent-offset source must be within the window.
-        // In SC mode window_base == chunk_start, so this prevents
-        // cross-chunk matches at the start of each chunk.
-        const recent_abs: usize = if (recent_offset < 0) @intCast(-recent_offset) else @intCast(recent_offset);
-        const can_use_recent: bool = cur_pos_in_window >= recent_abs;
-
-        var xor_value: u32 = 0;
-        if (can_use_recent) {
-            const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
-            const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
-            xor_value = bytes_at_cursor ^ recent_word;
-        }
+        // Content-compare first (like lzturbo): compute match address
+        // additively so underflow is impossible, then compare 4 bytes.
+        // Offset validity is checked only on content hits (rare path).
+        const match_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(window_base) + stored_pos_t);
+        const candidate_word: u32 = std.mem.readInt(u32, match_ptr[0..4], .little);
 
         var found_match = false;
         var offset_or_recent: u32 = 0;
         var current_offset: isize = 0;
         var match_end: [*]const u8 = undefined;
 
-        if (can_use_recent and (xor_value & 0xFFFFFF00) == 0) {
-            @branchHint(.likely);
-            // 1-byte literal + at least 3-byte recent match.
-            source_cursor += 1;
-            offset_or_recent = 0;
-            // Pre-advance hash insert: store the NEXT cursor (cursor+1) in
-            // whole-input coordinates so the next iteration's lookup sees it.
-            const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
-            const word2: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
-            const hi2: usize = @intCast((word2 *% hash_mult) >> hash_shift);
-            hash_table[hi2] = @truncate(pos2);
-            current_offset = recent_offset;
-            match_end = token_writer.extendMatchForward(source_cursor + 3, safe_source_end, current_offset);
-            found_match = true;
-        } else {
-            // Try hash-table match. Offset is computed T-width and widened.
-            // For T=u16 this wraps mod 65536; stale entries from > 64 KB
-            // ago will appear as small offsets and get filtered by the
-            // byte comparison at `source_cursor[-offset]` which mismatches
-            // for wrong-direction candidates.
-            const offset_candidate_t: T = cur_pos_t -% stored_pos_t;
-            const offset_candidate: u32 = @intCast(offset_candidate_t);
-            const cur_pos_for_bound: u32 = @truncate(cur_pos_in_block);
-
-            if (offset_candidate >= 8 and offset_candidate < dictionary_size and
-                offset_candidate <= cur_pos_for_bound)
-            {
-                const match_base_addr: usize = @intFromPtr(source_cursor) -% offset_candidate;
-                const match_base_ptr: [*]const u8 = @ptrFromInt(match_base_addr);
-                const candidate_word: u32 = std.mem.readInt(u32, match_base_ptr[0..4], .little);
-                if (bytes_at_cursor == candidate_word) {
-                    const ext_end = token_writer.extendMatchForward(
-                        source_cursor + 4,
-                        safe_source_end,
-                        -@as(isize, @intCast(offset_candidate)),
-                    );
-                    const match_len: usize = @intFromPtr(ext_end) - @intFromPtr(source_cursor);
-                    // Table index is `31 - log2(offset)` which equals `@clz(offset)`
-                    // for u32. Near offsets (bit 16 and below) have small indexes
-                    // (>=16) mapping to minimum_match_length; far offsets have
-                    // smaller indexes mapping to the long-match threshold.
-                    const log2_idx: u5 = @intCast(@clz(offset_candidate));
-                    const min_len: u32 = min_match_length_table[log2_idx];
-                    if (match_len >= min_len) {
-                        offset_or_recent = offset_candidate;
-                        current_offset = -@as(isize, @intCast(offset_candidate));
-                        match_end = ext_end;
-                        found_match = true;
-                    }
+        if (bytes_at_cursor == candidate_word) {
+            // Content matches — now validate the offset (rare path).
+            const offset_candidate: u32 = cur_pos_t -% stored_pos_t;
+            if (offset_candidate >= 8 and offset_candidate <= cur_pos_in_window) {
+                const match_len_raw: usize = @intFromPtr(
+                    token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -@as(isize, @intCast(offset_candidate))),
+                ) - @intFromPtr(source_cursor);
+                const log2_idx: u5 = @intCast(@clz(offset_candidate));
+                const min_len: u32 = min_match_length_table[log2_idx];
+                if (match_len_raw >= min_len) {
+                    offset_or_recent = offset_candidate;
+                    current_offset = -@as(isize, @intCast(offset_candidate));
+                    match_end = source_cursor + match_len_raw;
+                    found_match = true;
                 }
             }
+        }
 
-            // Fallback: offset-8 match (guarded by window bounds).
-            if (!found_match and cur_pos_in_window >= 8) {
+        if (!found_match) {
+            // Recent-offset candidate.
+            const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
+            const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
+            const xor_value: u32 = bytes_at_cursor ^ recent_word;
+
+            if ((xor_value & 0xFFFFFF00) == 0) {
+                source_cursor += 1;
+                offset_or_recent = 0;
+                const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
+                const word2: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
+                const hi2: usize = @intCast((word2 *% hash_mult) >> hash_shift);
+                hash_table[hi2] = @truncate(pos2);
+                current_offset = recent_offset;
+                match_end = token_writer.extendMatchForward(source_cursor + 3, safe_source_end, current_offset);
+                found_match = true;
+            } else {
+                // Fallback: offset-8 match.
                 const off8_src_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% 8);
                 const off8_word: u32 = std.mem.readInt(u32, off8_src_ptr[0..4], .little);
                 if (bytes_at_cursor == off8_word) {
@@ -191,16 +175,16 @@ pub fn runGreedyParser(
                     match_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -8);
                     found_match = true;
                 }
-            }
 
-            // Level ≥ 2: try 2/3-byte recent match when the first 2 bytes match.
-            if (comptime level >= 2) {
-                if (!found_match and can_use_recent and (xor_value & 0xFFFF) == 0) {
-                    offset_or_recent = 0;
-                    current_offset = recent_offset;
-                    const extra: usize = if ((xor_value & 0xFFFFFF) == 0) 3 else 2;
-                    match_end = source_cursor + extra;
-                    found_match = true;
+                // Level >= 2: try 2/3-byte recent match.
+                if (comptime level >= 2) {
+                    if (!found_match and (xor_value & 0xFFFF) == 0) {
+                        offset_or_recent = 0;
+                        current_offset = recent_offset;
+                        const extra: usize = if ((xor_value & 0xFFFFFF) == 0) 3 else 2;
+                        match_end = source_cursor + extra;
+                        found_match = true;
+                    }
                 }
             }
         }
