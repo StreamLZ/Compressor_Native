@@ -609,10 +609,6 @@ inline fn processOneToken(
     lit_stream += lit_len;
 
     const match_addr: usize = @intFromPtr(d) +% @as(usize, @bitCast(@as(isize, offset)));
-    if (match_addr < @intFromPtr(dst_start)) {
-        @branchHint(.cold);
-        return error.OutputTruncated;
-    }
     const match_ptr: [*]const u8 = @ptrFromInt(match_addr);
     copy.copy64(d, match_ptr);
     copy.copy64(d + 8, match_ptr + 8);
