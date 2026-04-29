@@ -108,6 +108,25 @@ pub fn build(b: *std.Build) void {
     const fuzz_install = b.addInstallArtifact(fuzz_exe, .{});
     const fuzz_step = b.step("fuzz", "Build fuzz_decompress harness (ReleaseSafe)");
     fuzz_step.dependOn(&fuzz_install.step);
+
+    // ---- C API static library ----
+    const lib_module = b.createModule(.{
+        .root_source_file = b.path("src/capi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .strip = strip,
+    });
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "streamlz",
+        .root_module = lib_module,
+    });
+    lib.linkLibC();
+    const lib_install = b.addInstallArtifact(lib, .{});
+    const hdr_install = b.addInstallHeaderFile(b.path("include/streamlz.h"), "streamlz.h");
+    const lib_step = b.step("lib", "Build C API static library (libstreamlz.a)");
+    lib_step.dependOn(&lib_install.step);
+    lib_step.dependOn(&hdr_install.step);
 }
 
 fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
