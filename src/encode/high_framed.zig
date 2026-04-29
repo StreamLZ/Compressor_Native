@@ -65,11 +65,22 @@ pub fn compressFramedHigh(
     const mapping = mapHighLevel(opts.level);
 
     // ── Frame header ────────────────────────────────────────────────────
+    // Adaptive SC group size: larger groups for larger files to improve
+    // match window (better ratio). Target ~16 groups so parallel decode
+    // still has enough work units. Minimum 4 chunks per group.
+    const num_chunks_total: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const adaptive_group: u8 = blk: {
+        const target_groups: usize = 16;
+        const ideal = @max(num_chunks_total / target_groups, lz_constants.sc_group_size);
+        break :blk @intCast(@min(ideal, 255));
+    };
+
     var pos: usize = 0;
     const hdr_len = try frame.writeHeader(dst, .{
         .codec = .high,
         .level = @intCast(mapping.codec_level),
         .block_size = opts.block_size,
+        .sc_group_size = if (mapping.self_contained) adaptive_group else lz_constants.default_sc_group_size,
         .content_size = if (opts.include_content_size) @as(u64, @intCast(src.len)) else null,
         .dictionary_id = opts.dictionary_id,
     });
@@ -178,6 +189,7 @@ pub fn compressFramedHigh(
             sc_flag_bit,
             resolved_threads,
             dict_len_g,
+            adaptive_group,
         );
         pos += written;
         try emitScPrefixTable(src, dst, &pos);
@@ -365,7 +377,7 @@ pub fn compressFramedHigh(
             const block_src_len: usize = @min(effective_src_h.len - src_off, lz_constants.chunk_size);
             const block_dst_remaining: usize = dst.len - pos;
             const chunk_idx = (src_off - dict_len_h) / lz_constants.chunk_size;
-            const at_group_start = (chunk_idx % lz_constants.sc_group_size) == 0;
+            const at_group_start = (chunk_idx % adaptive_group) == 0;
             const keyframe = (self_contained and at_group_start) or src_off == dict_len_h;
             var chunk_ctx = ctx;
             chunk_ctx.force_initial_copy = self_contained and at_group_start;

@@ -269,6 +269,7 @@ const ScShared = struct {
     captured_err: std.atomic.Value(u16),
     num_chunks: usize,
     num_groups: usize,
+    group_size: usize,
 };
 
 fn scWorkerFn(shared: *ScShared) void {
@@ -302,7 +303,7 @@ fn scWorkerFn(shared: *ScShared) void {
         null;
     defer if (sc_mt_buf) |buf| shared.backing_allocator.free(buf);
 
-    const group_size = lz_constants.sc_group_size;
+    const group_size = shared.group_size;
 
     while (true) {
         const g = shared.next_group.fetchAdd(1, .monotonic);
@@ -411,10 +412,11 @@ pub fn compressInternalParallelSc(
     sc_flag_bit: u8,
     num_threads: u32,
     dict_prefix_len_sc: usize,
+    sc_group_size_override: u8,
 ) CompressError!usize {
     const content_len = src.len - dict_prefix_len_sc;
     const num_chunks: usize = (content_len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
-    const group_size = lz_constants.sc_group_size;
+    const group_size: usize = sc_group_size_override;
     const num_groups: usize = (num_chunks + group_size - 1) / group_size;
 
     // Per-chunk tmp buffers sized to compressBound(block_src_len).
@@ -448,6 +450,7 @@ pub fn compressInternalParallelSc(
         .captured_err = std.atomic.Value(u16).init(0),
         .num_chunks = num_chunks,
         .num_groups = num_groups,
+        .group_size = group_size,
     };
 
     const worker_count: usize = @min(@as(usize, num_threads), num_groups);
