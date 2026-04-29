@@ -21,10 +21,23 @@ extern "C" {
 /*
  * Compress `src_len` bytes from `src` into `dst`.
  *
- * `level` must be 1-11 (clamped if out of range).
- *   L1     — fastest compress, fast decompress
- *   L5     — balanced
- *   L9-L11 — best ratio, slow compress
+ * `level` selects the compression level (1-11, clamped if out of range):
+ *
+ *   Level  Codec  Ratio*  Compress*    Decompress*   Notes
+ *   ─────  ─────  ──────  ──────────   ───────────   ─────────────────────
+ *   1      Fast   54.9%   4,200 MB/s   34,000 MB/s   Fastest. Greedy parser.
+ *   2      Fast   54.1%      83 MB/s   20,000 MB/s   Greedy, u32 hash.
+ *   3      Fast   53.4%      72 MB/s   11,000 MB/s   Greedy + entropy.
+ *   4      Fast   51.0%      62 MB/s    6,500 MB/s   Greedy + entropy.
+ *   5      Fast   43.4%      40 MB/s   11,000 MB/s   Chain parser + entropy.
+ *   6      High   29.1%      45 MB/s   12,000 MB/s   Optimal parser, SC parallel.
+ *   7      High   29.0%      35 MB/s   12,000 MB/s   Optimal parser, SC parallel.
+ *   8      High   28.6%      19 MB/s   11,000 MB/s   Optimal + BT4 finder.
+ *   9      High   27.4%     7.9 MB/s    2,200 MB/s   Optimal, 128 MB window.
+ *   10     High   27.3%     7.5 MB/s    2,300 MB/s   Optimal, 128 MB window.
+ *   11     High   25.6%     1.3 MB/s    1,400 MB/s   BT4, 128 MB window. Best ratio.
+ *
+ *   * Approximate, enwik8 100 MB, 24 threads, Arrow Lake-S.
  *
  * Returns the number of compressed bytes written to `dst`,
  * or 0 on failure (dst too small, allocation error).
