@@ -130,8 +130,10 @@ Full-speed numbers with all 24 cores. `streamlz -ba -r 3 --no-dict`.
 | L10 | 27,280,109 | 27.3% |   7.3 MB/s |  2,057 MB/s |
 | L11 | 25,550,460 | 25.6% |   1.3 MB/s |  2,019 MB/s |
 
-L1 compress is parallel (SC, per-chunk workers); L2-L5 serial; L6-L11
-parallel (High codec). All decompress is parallel.
+L1 compress is parallel (SC, per-chunk workers); L2-L5 compress serial;
+L6-L11 compress parallel (High codec). All decompress is parallel:
+L1 SC group-parallel, L2-L5 sidecar parallel, L6-L8 SC group-parallel
+(adaptive group size), L9-L11 two-phase parallel.
 
 ### All levels (24 cores, enwik9 — 1 GB)
 
