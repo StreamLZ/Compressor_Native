@@ -24,14 +24,15 @@ Zig 0.15.2 with byte-exact wire-format compatibility.
 - Streaming decompress to `std.Io.Writer` with XXH32 content-checksum
   verification.
 
-### Performance (Arrow Lake-S, 24 cores, enwik8 100 MB)
+### Performance (Arrow Lake-S, 24 cores, enwik8 100 MB, best of 3)
 
-- L1 parallel decompress: 29 GB/s
-- L2-L4 parallel decompress: 6-19 GB/s
-- L5 parallel decompress: 12 GB/s
-- L6-L8 SC group-parallel decompress: 10-12 GB/s
-- L9-L11 two-phase parallel decompress: 1.5-1.7 GB/s
-- L9 compress: 7.6 MB/s (SIMD hash probe + dual-bucket prefetch)
+- L1 parallel decompress: 34 GB/s
+- L2-L4 parallel decompress: 6.5-20 GB/s
+- L5 parallel decompress: 11 GB/s
+- L6-L8 SC group-parallel decompress: 11-12 GB/s
+- L9-L11 two-phase parallel decompress: 1.4-2.3 GB/s
+- L1 parallel compress: 4.2 GB/s
+- L9 compress: 7.9 MB/s (SIMD hash probe + dual-bucket prefetch)
 
 ### Key optimizations over v1
 
