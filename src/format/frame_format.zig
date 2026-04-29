@@ -126,7 +126,7 @@ pub fn parseHeader(src: []const u8) ParseError!FrameHeader {
 
     const raw_flags: FrameFlags = @bitCast(src[pos]);
     pos += 1;
-    const codec: Codec = std.meta.intToEnum(Codec, src[pos]) catch return error.BadCodec;
+    const codec: Codec = std.enums.fromInt(Codec, src[pos]) orelse return error.BadCodec;
     pos += 1;
     const lvl = src[pos];
     pos += 1;

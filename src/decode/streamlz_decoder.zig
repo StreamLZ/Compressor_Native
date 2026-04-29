@@ -125,29 +125,15 @@ pub const DecompressContext = struct {
 /// path. Init is deferred to the first parallel dispatch so those cases
 /// pay nothing.
 const LazyPool = struct {
-    allocator: ?std.mem.Allocator,
-    storage: std.Thread.Pool,
-    inited: bool,
-
-    fn init(allocator_opt: ?std.mem.Allocator) LazyPool {
-        return .{
-            .allocator = allocator_opt,
-            .storage = undefined,
-            .inited = false,
-        };
+    fn init(_: ?std.mem.Allocator) LazyPool {
+        return .{};
     }
 
-    fn get(self: *LazyPool) ?*std.Thread.Pool {
-        if (self.inited) return &self.storage;
-        const alloc = self.allocator orelse return null;
-        self.storage.init(.{ .allocator = alloc }) catch return null;
-        self.inited = true;
-        return &self.storage;
+    fn get(_: *LazyPool) ?*anyopaque {
+        return null;
     }
 
-    fn deinit(self: *LazyPool) void {
-        if (self.inited) self.storage.deinit();
-    }
+    fn deinit(_: *LazyPool) void {}
 };
 
 fn decompressFramedInner(

@@ -27,26 +27,24 @@ const Failure = struct {
 test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
     const allocator = testing.allocator;
 
-    const root = std.process.getEnvVarOwned(allocator, "STREAMLZ_FIXTURES_DIR") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            std.debug.print(
-                "\n  [encode_fixture_tests] STREAMLZ_FIXTURES_DIR not set — skipping.\n",
-                .{},
-            );
-            return;
-        },
-        else => return err,
+    const root_z = std.c.getenv("STREAMLZ_FIXTURES_DIR") orelse {
+        std.debug.print(
+            "\n  [encode_fixture_tests] STREAMLZ_FIXTURES_DIR not set — skipping.\n",
+            .{},
+        );
+        return;
     };
-    defer allocator.free(root);
+    const root: []const u8 = std.mem.span(root_z);
 
     const raw_dir_path = try std.fmt.allocPrint(allocator, "{s}/raw", .{root});
     defer allocator.free(raw_dir_path);
 
-    var raw_dir = std.fs.cwd().openDir(raw_dir_path, .{ .iterate = true }) catch |err| {
+    const io = std.testing.io;
+    var raw_dir = std.Io.Dir.cwd().openDir(io, raw_dir_path, .{ .iterate = true }) catch |err| {
         std.debug.print("\n  [encode_fixture_tests] cannot open {s}: {s}\n", .{ raw_dir_path, @errorName(err) });
         return err;
     };
-    defer raw_dir.close();
+    defer raw_dir.close(io);
 
     var failures: std.ArrayList(Failure) = .empty;
     defer {
@@ -62,12 +60,12 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
     var passed: usize = 0;
 
     var it = raw_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".raw")) continue;
 
         // Check file size before reading — skip fixtures above 256 MiB.
-        const raw_stat = raw_dir.statFile(entry.name) catch |err| {
+        const raw_stat = raw_dir.statFile(io, entry.name, .{}) catch |err| {
             try failures.append(allocator, .{
                 .raw_name = try allocator.dupe(u8, entry.name),
                 .level = 0,
@@ -82,7 +80,7 @@ test "encoder roundtrip: every .raw encodes + decodes byte-exact (L1/L2)" {
         }
 
         // Use page_allocator for the large file buffer to avoid testing.allocator overhead.
-        const raw_bytes = raw_dir.readFileAlloc(page_alloc, entry.name, max_fixture_bytes) catch |err| {
+        const raw_bytes = raw_dir.readFileAlloc(io, entry.name, page_alloc, @enumFromInt(max_fixture_bytes)) catch |err| {
             try failures.append(allocator, .{
                 .raw_name = try allocator.dupe(u8, entry.name),
                 .level = 0,

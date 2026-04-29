@@ -61,7 +61,7 @@ pub fn analyzeForwardLz(
     const hash_mult = hasher.hash_mult;
     const hash_shift = hasher.hash_shift;
 
-    var matches = std.ArrayList(MatchInfo){};
+    var matches = std.ArrayList(MatchInfo).empty;
     defer matches.deinit(allocator);
 
     var covered = try allocator.alloc(u8, src.len);
@@ -124,7 +124,7 @@ pub fn analyzeForwardLz(
                 .first_dest = m.dest_pos,
                 .length = m.length,
                 .count = 1,
-                .positions = std.ArrayList(u32){},
+                .positions = std.ArrayList(u32).empty,
             };
             try g.positions.append(allocator, m.dest_pos);
             gop.value_ptr.* = g;
@@ -136,11 +136,11 @@ pub fn analyzeForwardLz(
     }
 
     // ── Step 3: Build streams ──
-    var pattern_bytes = std.ArrayList(u8){};
+    var pattern_bytes = std.ArrayList(u8).empty;
     defer pattern_bytes.deinit(allocator);
-    var position_deltas = std.ArrayList(u8){};
+    var position_deltas = std.ArrayList(u8).empty;
     defer position_deltas.deinit(allocator);
-    var control_bytes = std.ArrayList(u8){};
+    var control_bytes = std.ArrayList(u8).empty;
     defer control_bytes.deinit(allocator);
 
     var num_forward: usize = 0;
@@ -176,9 +176,9 @@ pub fn analyzeForwardLz(
     }
 
     // Literal stream + literal position deltas
-    var lit_bytes = std.ArrayList(u8){};
+    var lit_bytes = std.ArrayList(u8).empty;
     defer lit_bytes.deinit(allocator);
-    var lit_pos_deltas = std.ArrayList(u8){};
+    var lit_pos_deltas = std.ArrayList(u8).empty;
     defer lit_pos_deltas.deinit(allocator);
 
     var num_lits: usize = 0;

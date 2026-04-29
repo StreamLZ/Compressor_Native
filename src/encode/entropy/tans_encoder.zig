@@ -1241,68 +1241,68 @@ fn tansRoundtripChunk(allocator: std.mem.Allocator, src: []const u8) !void {
 }
 
 test "tANS roundtrip: enwik8 first 64 KB" {
+    const io = std.testing.io;
     const allocator = testing.allocator;
-    const file = std.fs.cwd().openFile(
+    const file = std.Io.Dir.cwd().openFile(io,
         "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/enwik8.txt",
         .{},
-    ) catch return; // Skip if asset missing.
-    defer file.close();
+    ) catch return;
+    defer file.close(io);
 
     const src = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(src);
-    const read = try file.readAll(src);
+    const read = try file.readPositionalAll(io, src, 0);
     if (read != src.len) return error.SkipZigTest;
 
     try tansRoundtripChunk(allocator, src);
 }
 
 test "tANS roundtrip: enwik8 offset 1 MB, 128 KB chunk" {
+    const io = std.testing.io;
     const allocator = testing.allocator;
-    const file = std.fs.cwd().openFile(
+    const file = std.Io.Dir.cwd().openFile(io,
         "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/enwik8.txt",
         .{},
     ) catch return;
-    defer file.close();
+    defer file.close(io);
 
-    try file.seekTo(1024 * 1024);
     const src = try allocator.alloc(u8, 128 * 1024);
     defer allocator.free(src);
-    const read = try file.readAll(src);
+    const read = try file.readPositionalAll(io, src, 1024 * 1024);
     if (read != src.len) return error.SkipZigTest;
 
     try tansRoundtripChunk(allocator, src);
 }
 
 test "tANS roundtrip: silesia first 64 KB (binary-ish)" {
+    const io = std.testing.io;
     const allocator = testing.allocator;
-    const file = std.fs.cwd().openFile(
+    const file = std.Io.Dir.cwd().openFile(io,
         "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/silesia_all.tar",
         .{},
     ) catch return;
-    defer file.close();
+    defer file.close(io);
 
-    // Skip the tar header zero padding at the very start.
-    try file.seekTo(1024 * 1024);
     const src = try allocator.alloc(u8, 64 * 1024);
     defer allocator.free(src);
-    const read = try file.readAll(src);
+    const read = try file.readPositionalAll(io, src, 1024 * 1024);
     if (read != src.len) return error.SkipZigTest;
 
     try tansRoundtripChunk(allocator, src);
 }
 
 test "tANS roundtrip: silesia 128 KB at offset 2 MB" {
+    const io = std.testing.io;
     const allocator = testing.allocator;
-    const file = std.fs.cwd().openFile(
+    const file = std.Io.Dir.cwd().openFile(io,
         "c:/Users/james.JAMESWORK2025/Repos/StreamLZ/assets/silesia_all.tar",
         .{},
     ) catch return;
-    defer file.close();
+    defer file.close(io);
 
-    try file.seekTo(2 * 1024 * 1024);
     const src = try allocator.alloc(u8, 128 * 1024);
     defer allocator.free(src);
-    const read = try file.readAll(src);
+    const read = try file.readPositionalAll(io, src, 2 * 1024 * 1024);
     if (read != src.len) return error.SkipZigTest;
 
     try tansRoundtripChunk(allocator, src);

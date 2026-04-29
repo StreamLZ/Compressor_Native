@@ -68,35 +68,33 @@ fn rawNameFromSlz(allocator: std.mem.Allocator, slz_name: []const u8) ![]u8 {
 test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
     const allocator = testing.allocator;
 
-    const root = std.process.getEnvVarOwned(allocator, "STREAMLZ_FIXTURES_DIR") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => {
-            std.debug.print(
-                "\n  [fixture_tests] STREAMLZ_FIXTURES_DIR not set — skipping.\n" ++
-                    "  Run scripts/gen_fixtures.sh and set STREAMLZ_FIXTURES_DIR=./fixtures\n",
-                .{},
-            );
-            return;
-        },
-        else => return err,
+    const root_z = std.c.getenv("STREAMLZ_FIXTURES_DIR") orelse {
+        std.debug.print(
+            "\n  [fixture_tests] STREAMLZ_FIXTURES_DIR not set — skipping.\n" ++
+                "  Run scripts/gen_fixtures.sh and set STREAMLZ_FIXTURES_DIR=./fixtures\n",
+            .{},
+        );
+        return;
     };
-    defer allocator.free(root);
+    const root: []const u8 = std.mem.span(root_z);
 
     const slz_dir_path = try std.fmt.allocPrint(allocator, "{s}/slz", .{root});
     defer allocator.free(slz_dir_path);
     const raw_dir_path = try std.fmt.allocPrint(allocator, "{s}/raw", .{root});
     defer allocator.free(raw_dir_path);
 
-    var slz_dir = std.fs.cwd().openDir(slz_dir_path, .{ .iterate = true }) catch |err| {
+    const io = std.testing.io;
+    var slz_dir = std.Io.Dir.cwd().openDir(io, slz_dir_path, .{ .iterate = true }) catch |err| {
         std.debug.print("\n  [fixture_tests] cannot open {s}: {s}\n", .{ slz_dir_path, @errorName(err) });
         return err;
     };
-    defer slz_dir.close();
+    defer slz_dir.close(io);
 
-    var raw_dir = std.fs.cwd().openDir(raw_dir_path, .{}) catch |err| {
+    var raw_dir = std.Io.Dir.cwd().openDir(io, raw_dir_path, .{}) catch |err| {
         std.debug.print("\n  [fixture_tests] cannot open {s}: {s}\n", .{ raw_dir_path, @errorName(err) });
         return err;
     };
-    defer raw_dir.close();
+    defer raw_dir.close(io);
 
     var failures: std.ArrayList(Failure) = .empty;
     defer {
@@ -112,7 +110,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
     var passed: usize = 0;
 
     var it = slz_dir.iterate();
-    while (try it.next()) |entry| {
+    while (try it.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".slz")) continue;
 
@@ -129,7 +127,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
         defer allocator.free(raw_name);
 
         // Check file sizes before reading — skip fixtures above 256 MiB.
-        const slz_stat = slz_dir.statFile(entry.name) catch |err| {
+        const slz_stat = slz_dir.statFile(io, entry.name, .{}) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "stat slz"),
@@ -143,7 +141,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
             continue;
         }
 
-        const raw_stat = raw_dir.statFile(raw_name) catch |err| {
+        const raw_stat = raw_dir.statFile(io, raw_name, .{}) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "stat raw"),
@@ -158,7 +156,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
         }
 
         // Read both files using page_allocator to avoid testing.allocator overhead on large buffers.
-        const slz_bytes = slz_dir.readFileAlloc(page_alloc, entry.name, max_fixture_bytes) catch |err| {
+        const slz_bytes = slz_dir.readFileAlloc(io, entry.name, page_alloc, @enumFromInt(max_fixture_bytes)) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "read slz"),
@@ -168,7 +166,7 @@ test "fixture corpus roundtrip: every .slz decodes to its matching .raw" {
         };
         defer page_alloc.free(slz_bytes);
 
-        const raw_bytes = raw_dir.readFileAlloc(page_alloc, raw_name, max_fixture_bytes) catch |err| {
+        const raw_bytes = raw_dir.readFileAlloc(io, raw_name, page_alloc, @enumFromInt(max_fixture_bytes)) catch |err| {
             try failures.append(allocator, .{
                 .slz_name = try allocator.dupe(u8, entry.name),
                 .reason = try allocator.dupe(u8, "read raw"),

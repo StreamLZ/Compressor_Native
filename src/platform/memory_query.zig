@@ -1,51 +1,64 @@
 //! Platform-specific memory query and thread-budget calculation.
-//!
-//! Extracted from `encode/streamlz_encoder.zig` so that Windows FFI
-//! types and kernel32 externs live in one isolated module that the
-//! encoder (and any future parallel decoder) can import without
-//! polluting the compressor namespace.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const is_windows = builtin.os.tag == .windows;
 
-// ────────────────────────────────────────────────────────────
-//  Constants
-// ────────────────────────────────────────────────────────────
-
-/// Estimated memory consumption per parallel compress worker thread
-/// (40 MB). Used by `calculateMaxThreads` to cap the thread count so the
-/// total worker footprint stays within a fraction of available RAM.
 pub const per_thread_memory_estimate: u64 = 40 * 1024 * 1024;
-
-/// Fraction of total physical RAM that parallel compression is
-/// allowed to consume (60%).
 pub const memory_budget_pct: u64 = 60;
 
-// ────────────────────────────────────────────────────────────
-//  Platform-specific total-physical-memory query
-// ────────────────────────────────────────────────────────────
+const win32 = if (is_windows) struct {
+    const MemoryStatusEx = extern struct {
+        dwLength: u32,
+        dwMemoryLoad: u32,
+        ullTotalPhys: u64,
+        ullAvailPhys: u64,
+        ullTotalPageFile: u64,
+        ullAvailPageFile: u64,
+        ullTotalVirtual: u64,
+        ullAvailVirtual: u64,
+        ullAvailExtendedVirtual: u64,
+    };
 
-const MemoryStatusEx = extern struct {
-    dwLength: u32,
-    dwMemoryLoad: u32,
-    ullTotalPhys: u64,
-    ullAvailPhys: u64,
-    ullTotalPageFile: u64,
-    ullAvailPageFile: u64,
-    ullTotalVirtual: u64,
-    ullAvailVirtual: u64,
-    ullAvailExtendedVirtual: u64,
-};
+    extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) callconv(.winapi) std.os.windows.BOOL;
 
-extern "kernel32" fn GlobalMemoryStatusEx(lpBuffer: *MemoryStatusEx) callconv(.winapi) std.os.windows.BOOL;
+    const SYSTEM_CPU_SET_INFORMATION = extern struct {
+        Size: u32,
+        Type: u32,
+        Id: u32,
+        Group: u16,
+        LogicalProcessorIndex: u8,
+        CoreIndex: u8,
+        LastLevelCacheIndex: u8,
+        NumaNodeIndex: u8,
+        EfficiencyClass: u8,
+        AllFlags: u8,
+        Reserved: u32 = 0,
+        AllocationTag: u64 = 0,
+    };
 
-/// Returns the total physical memory on the host, in bytes, or `0`
-/// when the query is unavailable / unsupported. Used by
-/// `calculateMaxThreads` as the input to the memory-budget cap.
+    extern "kernel32" fn GetSystemCpuSetInformation(
+        Information: ?[*]SYSTEM_CPU_SET_INFORMATION,
+        BufferLength: u32,
+        ReturnedLength: *u32,
+        Process: ?std.os.windows.HANDLE,
+        Flags: u32,
+    ) callconv(.winapi) std.os.windows.BOOL;
+
+    extern "kernel32" fn SetThreadSelectedCpuSets(
+        Thread: std.os.windows.HANDLE,
+        CpuSetIds: [*]const u32,
+        CpuSetIdCount: u32,
+    ) callconv(.winapi) std.os.windows.BOOL;
+
+    extern "kernel32" fn GetCurrentThread() callconv(.winapi) std.os.windows.HANDLE;
+} else struct {};
+
 pub fn totalAvailableMemoryBytes() u64 {
-    const os = @import("builtin").os.tag;
+    const os = builtin.os.tag;
     if (os == .windows) {
-        var ms: MemoryStatusEx = .{
-            .dwLength = @sizeOf(MemoryStatusEx),
+        var ms: win32.MemoryStatusEx = .{
+            .dwLength = @sizeOf(win32.MemoryStatusEx),
             .dwMemoryLoad = 0,
             .ullTotalPhys = 0,
             .ullAvailPhys = 0,
@@ -55,14 +68,13 @@ pub fn totalAvailableMemoryBytes() u64 {
             .ullAvailVirtual = 0,
             .ullAvailExtendedVirtual = 0,
         };
-        if (GlobalMemoryStatusEx(&ms) == 0) return 0;
+        if (win32.GlobalMemoryStatusEx(&ms) == .FALSE) return 0;
         return ms.ullTotalPhys;
     } else if (os == .linux or os == .android) {
         var info: std.posix.system.sysinfo = undefined;
         if (std.posix.system.sysinfo(&info) != 0) return 0;
         return @as(u64, info.totalram) * @as(u64, info.mem_unit);
     } else if (os == .macos or os == .ios) {
-        // HW_MEMSIZE via sysctl
         var mem: u64 = 0;
         var size: usize = @sizeOf(u64);
         const mib = [2]c_int{ std.posix.CTL.HW, std.posix.system.HW.MEMSIZE };
@@ -74,14 +86,6 @@ pub fn totalAvailableMemoryBytes() u64 {
     }
 }
 
-/// Dynamically calculates the maximum number of compression worker
-/// threads based on CPU count and available system memory.
-/// Caps at 60% of total physical RAM.
-/// When the host's memory is unknown (non-Windows / query failure),
-/// falls back to just the CPU count.
-///
-/// The `src_len` parameter is the estimate for shared memory
-/// overhead (estimated as `srcLen`).
 pub fn calculateMaxThreads(src_len: usize) u32 {
     const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
     const total_memory: u64 = totalAvailableMemoryBytes();
@@ -98,39 +102,6 @@ pub fn calculateMaxThreads(src_len: usize) u32 {
     return @max(@as(u32, 1), max_by_memory_u32);
 }
 
-// ────────────────────────────────────────────────────────────
-//  P-core detection and thread affinity
-// ────────────────────────────────────────────────────────────
-
-const SYSTEM_CPU_SET_INFORMATION = extern struct {
-    Size: u32,
-    Type: u32,
-    Id: u32,
-    Group: u16,
-    LogicalProcessorIndex: u8,
-    CoreIndex: u8,
-    LastLevelCacheIndex: u8,
-    NumaNodeIndex: u8,
-    EfficiencyClass: u8,
-    AllFlags: u8,
-    Reserved: u32 = 0,
-    AllocationTag: u64 = 0,
-};
-
-extern "kernel32" fn GetSystemCpuSetInformation(
-    Information: ?[*]SYSTEM_CPU_SET_INFORMATION,
-    BufferLength: u32,
-    ReturnedLength: *u32,
-    Process: ?std.os.windows.HANDLE,
-    Flags: u32,
-) callconv(.winapi) std.os.windows.BOOL;
-
-extern "kernel32" fn SetThreadSelectedCpuSets(
-    Thread: std.os.windows.HANDLE,
-    CpuSetIds: [*]const u32,
-    CpuSetIdCount: u32,
-) callconv(.winapi) std.os.windows.BOOL;
-
 pub const CoreInfo = struct {
     p_core_count: u32,
     e_core_count: u32,
@@ -141,27 +112,27 @@ pub const CoreInfo = struct {
 };
 
 pub fn detectCores() CoreInfo {
-    if (@import("builtin").os.tag != .windows) {
+    if (!is_windows) {
         const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
         return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
     }
 
     var needed: u32 = 0;
-    _ = GetSystemCpuSetInformation(null, 0, &needed, null, 0);
+    _ = win32.GetSystemCpuSetInformation(null, 0, &needed, null, 0);
     if (needed == 0) {
         const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
         return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
     }
 
-    var buf: [256]SYSTEM_CPU_SET_INFORMATION = undefined;
+    var buf: [256]win32.SYSTEM_CPU_SET_INFORMATION = undefined;
     const buf_bytes: u32 = @intCast(@min(needed, @sizeOf(@TypeOf(buf))));
     var returned: u32 = 0;
-    if (GetSystemCpuSetInformation(&buf, buf_bytes, &returned, null, 0) == 0) {
+    if (win32.GetSystemCpuSetInformation(&buf, buf_bytes, &returned, null, 0) == .FALSE) {
         const cpu: u32 = @intCast(std.Thread.getCpuCount() catch 1);
         return .{ .p_core_count = cpu, .e_core_count = 0, .total_cores = cpu, .is_hybrid = false };
     }
 
-    const count = returned / @sizeOf(SYSTEM_CPU_SET_INFORMATION);
+    const count = returned / @sizeOf(win32.SYSTEM_CPU_SET_INFORMATION);
     var max_efficiency: u8 = 0;
     for (buf[0..count]) |info| {
         if (info.EfficiencyClass > max_efficiency) max_efficiency = info.EfficiencyClass;
@@ -192,27 +163,18 @@ pub fn detectCores() CoreInfo {
     return result;
 }
 
-extern "kernel32" fn GetCurrentThread() callconv(.winapi) std.os.windows.HANDLE;
-
 pub fn pinCurrentThreadToCpuSet(ids: []const u32) void {
-    if (@import("builtin").os.tag != .windows or ids.len == 0) return;
-    _ = SetThreadSelectedCpuSets(
-        GetCurrentThread(),
+    if (!is_windows or ids.len == 0) return;
+    _ = win32.SetThreadSelectedCpuSets(
+        win32.GetCurrentThread(),
         ids.ptr,
         @intCast(ids.len),
     );
 }
 
-// ────────────────────────────────────────────────────────────
-//  Tests
-// ────────────────────────────────────────────────────────────
-
 const testing = std.testing;
 
 test "calculateMaxThreads: returns at least 1" {
-    // Any non-negative input must yield a positive thread count —
-    // a caller passing the result directly into the parallel
-    // dispatch should never see 0.
     const n = calculateMaxThreads(0);
     try testing.expect(n >= 1);
     const m = calculateMaxThreads(1024 * 1024);
@@ -226,18 +188,12 @@ test "calculateMaxThreads: doesn't exceed CPU count" {
 }
 
 test "calculateMaxThreads: scales down with huge src_len" {
-    // A huge shared-memory estimate (nearly the whole RAM budget)
-    // should drive `available_for_threads` below zero and clamp to
-    // 1. We can't observe this directly without knowing the host's
-    // total_memory, so we test with src_len == usize max, which
-    // guarantees `memory_budget <= shared_mem` on any host.
     const n = calculateMaxThreads(std.math.maxInt(usize) / 2);
     try testing.expect(n >= 1);
 }
 
 test "totalAvailableMemoryBytes: returns a plausible value on Windows" {
-    if (@import("builtin").os.tag != .windows) return;
+    if (!is_windows) return;
     const mem = totalAvailableMemoryBytes();
-    // Any Windows host running this test suite has at least 1 GB.
     try testing.expect(mem >= 1 * 1024 * 1024 * 1024);
 }

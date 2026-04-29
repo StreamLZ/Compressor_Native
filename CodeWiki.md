@@ -29,6 +29,7 @@ src/
     ptr_math.zig                  signed-offset pointer arithmetic
   platform/
     memory_query.zig              OS memory query (Windows/Linux/macOS)
+    mmap.zig                      cross-platform mmap helpers (read/read-write)
   decode/
     streamlz_decoder.zig          framed decompress + DecompressContext
     decompress_parallel.zig       parallel dispatch (SC + two-phase + sidecar)
@@ -102,10 +103,10 @@ independently.
 
 | Levels | Strategy | How it works |
 |--------|----------|--------------|
-| L1 | SC group-parallel | Encoder emits SC chunks. Each chunk decoded independently, no sidecar. |
+| L1 | SC group-parallel | Encoder compresses each 256KB chunk independently (no cross-chunk refs). Decoded via `decompressCoreParallel` using frame header's `sc_group_size`. No sidecar. |
 | L2-L4 | Sidecar (small) | Per-block BFS closure sidecar (~150 KB/100 MB). Workers decode contiguous slices independently. |
 | L5 | Sidecar (large) | Per-block sidecar (~1.2 MB/100 MB) with cross-chunk source bytes at depth ≥ 1. |
-| L6-L8 | SC group-parallel | Encoder constrains chunks to self-contained 4-chunk groups. Each group decoded independently. |
+| L6-L8 | SC group-parallel | Encoder constrains chunks to self-contained groups (adaptive size, ~16 groups per file). Each group decoded independently. |
 | L9-L11 | Two-phase | Phase 1: parallel entropy decode + resolveTokens. Phase 2: serial token execution. |
 
 ### Compress

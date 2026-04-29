@@ -685,7 +685,7 @@ pub fn analyzeFilePartition(
     defer allocator.free(producer_map);
     @memset(producer_map, std.math.maxInt(u32));
 
-    var tokens: std.ArrayList(TokenInfo) = .{};
+    var tokens: std.ArrayList(TokenInfo) = .empty;
     defer tokens.deinit(allocator);
 
     var file_pos_running: u64 = 0;
@@ -1039,8 +1039,8 @@ fn buildPpocSidecarInner(
     dict_prefix_len: usize,
 ) !PpocSidecar {
     var sidecar: PpocSidecar = .{
-        .match_ops = .{},
-        .literal_bytes = .{},
+        .match_ops = .empty,
+        .literal_bytes = .empty,
         .total_positions = 0,
     };
     errdefer sidecar.deinit(allocator);
@@ -1063,7 +1063,7 @@ fn buildPpocSidecarInner(
     defer allocator.free(producer_map);
     @memset(producer_map, std.math.maxInt(u32));
 
-    var tokens: std.ArrayList(TokenInfo) = .{};
+    var tokens: std.ArrayList(TokenInfo) = .empty;
     defer tokens.deinit(allocator);
 
     var file_pos_running: u64 = dict_prefix_len;
@@ -1160,7 +1160,7 @@ fn buildPpocSidecarInner(
 
     sidecar.total_positions = sidecar.match_ops.items.len + sidecar.literal_bytes.items.len;
 
-    if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_STATS") catch false) {
+    if (std.c.getenv("SLZ_CLOSURE_STATS") != null) {
         var max_depth: u8 = 0;
         var p_stat: u64 = 0;
         while (p_stat < total_decomp) : (p_stat += 1) {
@@ -1176,7 +1176,7 @@ fn buildPpocSidecarInner(
     // than T's target chunk must appear in the sidecar as a
     // literal_byte. Otherwise a parallel worker that decodes T's chunk
     // before T's src chunk would read an un-populated position.
-    if (std.process.hasEnvVar(allocator, "SLZ_CLOSURE_CHECK") catch false) {
+    if (std.c.getenv("SLZ_CLOSURE_CHECK") != null) {
         // The "covered" bitmap is just lit_seen — already built above.
         const covered = lit_seen;
 
@@ -1223,7 +1223,7 @@ fn buildPpocSidecarInner(
     // Any mismatch reveals either (a) a missing token, (b) a wrong
     // src_start, or (c) a wrong length that the per-token dst_ref
     // invariant check below can't detect.
-    if (std.process.hasEnvVar(allocator, "SLZ_WALKER_RECONSTRUCT") catch false) {
+    if (std.c.getenv("SLZ_WALKER_RECONSTRUCT") != null) {
         const recon = try allocator.alloc(u8, @intCast(total_decomp));
         defer allocator.free(recon);
         @memset(recon, 0xAA);

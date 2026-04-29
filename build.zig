@@ -37,6 +37,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .strip = strip,
+        .link_libc = true,
     });
     const bench_option = b.addOptions();
     bench_option.addOption(bool, "enable_bench", bench);
@@ -46,7 +47,6 @@ pub fn build(b: *std.Build) void {
         .name = "streamlz",
         .root_module = root_module,
     });
-    exe.linkLibC();
     if (bench) addVendorLibs(b, exe);
     b.installArtifact(exe);
 
@@ -69,12 +69,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
         .strip = strip,
+        .link_libc = true,
     });
     const safe_exe = b.addExecutable(.{
         .name = "streamlz-safe",
         .root_module = safe_module,
     });
-    safe_exe.linkLibC();
     addVendorLibs(b, safe_exe);
     const safe_install = b.addInstallArtifact(safe_exe, .{});
     const safe_step = b.step("safe", "Build with ReleaseSafe (bounds + overflow checks)");
@@ -90,12 +90,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSafe,
         .strip = strip,
+        .link_libc = true,
     });
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("scripts/fuzz_decompress.zig"),
         .target = target,
         .optimize = .ReleaseSafe,
         .strip = strip,
+        .link_libc = true,
         .imports = &.{
             .{ .name = "streamlz", .module = streamlz_module },
         },
@@ -104,7 +106,6 @@ pub fn build(b: *std.Build) void {
         .name = "fuzz-decompress",
         .root_module = fuzz_module,
     });
-    fuzz_exe.linkLibC();
     const fuzz_install = b.addInstallArtifact(fuzz_exe, .{});
     const fuzz_step = b.step("fuzz", "Build fuzz_decompress harness (ReleaseSafe)");
     fuzz_step.dependOn(&fuzz_install.step);
@@ -115,13 +116,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .strip = strip,
+        .link_libc = true,
     });
     const lib = b.addLibrary(.{
         .linkage = .static,
         .name = "streamlz",
         .root_module = lib_module,
     });
-    lib.linkLibC();
     const lib_install = b.addInstallArtifact(lib, .{});
     const hdr_install = b.addInstallHeaderFile(b.path("include/streamlz.h"), "streamlz.h");
     const lib_step = b.step("lib", "Build C API static library (libstreamlz.a)");
@@ -136,16 +137,10 @@ fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
     const c_flags = &.{ "-DXXH_NAMESPACE=ZSTD_", "-DZSTD_DISABLE_ASM", "-DZSTD_MULTITHREAD" };
 
     // ---- zstd (v1.5.7) — precompiled static library ----
-    const zstd_mod = b.createModule(.{ .target = target, .optimize = optimize });
-    const zstd_lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "zstd",
-        .root_module = zstd_mod,
-    });
-    zstd_lib.linkLibC();
-    zstd_lib.addIncludePath(b.path("vendor/zstd"));
-    zstd_lib.addIncludePath(b.path("vendor/zstd/common"));
-    zstd_lib.addCSourceFiles(.{ .files = &.{
+    const zstd_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    zstd_mod.addIncludePath(b.path("vendor/zstd"));
+    zstd_mod.addIncludePath(b.path("vendor/zstd/common"));
+    zstd_mod.addCSourceFiles(.{ .files = &.{
         "vendor/zstd/common/debug.c",
         "vendor/zstd/common/entropy_common.c",
         "vendor/zstd/common/error_private.c",
@@ -173,25 +168,29 @@ fn addVendorLibs(b: *std.Build, exe: *std.Build.Step.Compile) void {
         "vendor/zstd/decompress/zstd_decompress.c",
         "vendor/zstd/decompress/zstd_decompress_block.c",
     }, .flags = c_flags });
+    const zstd_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "zstd",
+        .root_module = zstd_mod,
+    });
 
     // ---- LZ4 (v1.10.0) — precompiled static library ----
-    const lz4_mod = b.createModule(.{ .target = target, .optimize = optimize });
+    const lz4_mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+    lz4_mod.addIncludePath(b.path("vendor/lz4"));
+    lz4_mod.addCSourceFiles(.{ .files = &.{
+        "vendor/lz4/lz4.c",
+        "vendor/lz4/lz4hc.c",
+    }, .flags = &.{} });
     const lz4_lib = b.addLibrary(.{
         .linkage = .static,
         .name = "lz4",
         .root_module = lz4_mod,
     });
-    lz4_lib.linkLibC();
-    lz4_lib.addIncludePath(b.path("vendor/lz4"));
-    lz4_lib.addCSourceFiles(.{ .files = &.{
-        "vendor/lz4/lz4.c",
-        "vendor/lz4/lz4hc.c",
-    }, .flags = &.{} });
 
     // Link the precompiled libs + expose include paths to the exe
-    exe.addIncludePath(b.path("vendor/zstd"));
-    exe.addIncludePath(b.path("vendor/zstd/common"));
-    exe.addIncludePath(b.path("vendor/lz4"));
-    exe.linkLibrary(zstd_lib);
-    exe.linkLibrary(lz4_lib);
+    exe.root_module.addIncludePath(b.path("vendor/zstd"));
+    exe.root_module.addIncludePath(b.path("vendor/zstd/common"));
+    exe.root_module.addIncludePath(b.path("vendor/lz4"));
+    exe.root_module.linkLibrary(zstd_lib);
+    exe.root_module.linkLibrary(lz4_lib);
 }

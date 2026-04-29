@@ -351,7 +351,7 @@ fn decodeOneChunk(
 ///   - `sc_group_size` MUST be > 0 (typically 4, from the frame header).
 pub fn decompressCoreParallel(
     allocator: std.mem.Allocator,
-    pool_opt: ?*std.Thread.Pool,
+    _: ?*anyopaque,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -394,9 +394,8 @@ pub fn decompressCoreParallel(
     const num_groups = (num_chunks + group_size - 1) / group_size;
     var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
     if (max_threads == 0) {
-        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
-            defer allocator.free(val);
-            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        if (std.c.getenv("SLZ_CORES")) |val| {
+            cpu_count_raw = std.fmt.parseInt(usize, std.mem.span(val), 10) catch cpu_count_raw;
         }
     }
     const worker_count: usize = @min(num_groups, @max(@as(usize, 1), cpu_count_raw));
@@ -433,17 +432,7 @@ pub fn decompressCoreParallel(
     // Fast path: single worker. Skip pool dispatch entirely.
     if (worker_count == 1) {
         workerFn(&shared, scratches[0]);
-    } else if (pool_opt) |pool| {
-        // Pool path: persistent thread pool reused across frame blocks.
-        // Avoids std.Thread.spawn syscall + new OS thread per call.
-        var wg: std.Thread.WaitGroup = .{};
-        for (0..worker_count) |i| {
-            pool.spawnWg(&wg, workerFn, .{ &shared, scratches[i] });
-        }
-        pool.waitAndWork(&wg);
     } else {
-        // Fallback: spawn one-shot threads (used when caller didn't
-        // hand us a pool — currently only the test path).
         const threads = try allocator.alloc(std.Thread, worker_count);
         defer allocator.free(threads);
 
@@ -665,7 +654,7 @@ fn tpPhase1OneChunk(
 ///     then use the serial decode path.
 pub fn decompressCoreTwoPhase(
     allocator: std.mem.Allocator,
-    pool_opt: ?*std.Thread.Pool,
+    _: ?*anyopaque,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -692,9 +681,8 @@ pub fn decompressCoreTwoPhase(
 
     var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
     if (max_threads == 0) {
-        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
-            defer allocator.free(val);
-            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        if (std.c.getenv("SLZ_CORES")) |val| {
+            cpu_count_raw = std.fmt.parseInt(usize, std.mem.span(val), 10) catch cpu_count_raw;
         }
     }
     const batch_size: usize = @max(@as(usize, 1), cpu_count_raw);
@@ -747,16 +735,7 @@ pub fn decompressCoreTwoPhase(
         // Phase 2: parallel entropy decode.
         if (batch_count == 1) {
             tpWorkerFn(&shared);
-        } else if (pool_opt) |pool| {
-            // Persistent pool: no thread spawn cost per batch.
-            const worker_count: usize = @min(batch_count, batch_size);
-            var wg: std.Thread.WaitGroup = .{};
-            for (0..worker_count) |_| {
-                pool.spawnWg(&wg, tpWorkerFn, .{&shared});
-            }
-            pool.waitAndWork(&wg);
         } else {
-            // Fallback: one-shot thread spawn per batch (test path).
             const worker_count: usize = @min(batch_count, batch_size);
             var spawned: usize = 0;
             while (spawned < worker_count) : (spawned += 1) {
@@ -1000,7 +979,7 @@ fn applySidecar(
 ///   to be pre-populated by a different worker's slice, causing races.
 pub fn decompressFastL14Parallel(
     allocator: std.mem.Allocator,
-    pool_opt: ?*std.Thread.Pool,
+    _: ?*anyopaque,
     block_src: []const u8,
     sidecar_body: []const u8,
     dst: []u8,
@@ -1038,9 +1017,8 @@ pub fn decompressFastL14Parallel(
     // Slice size aligned to 16 chunks (matching sidecar boundaries).
     var cpu_count_raw: usize = if (max_threads > 0) max_threads else std.Thread.getCpuCount() catch 1;
     if (max_threads == 0) {
-        if (std.process.getEnvVarOwned(allocator, "SLZ_CORES") catch null) |val| {
-            defer allocator.free(val);
-            cpu_count_raw = std.fmt.parseInt(usize, val, 10) catch cpu_count_raw;
+        if (std.c.getenv("SLZ_CORES")) |val| {
+            cpu_count_raw = std.fmt.parseInt(usize, std.mem.span(val), 10) catch cpu_count_raw;
         }
     }
     const max_workers: usize = @min(24, @min(num_chunks, cpu_count_raw));
@@ -1101,7 +1079,7 @@ pub fn decompressFastL14Parallel(
     };
 
     // Sidecar literals applied inside each worker (distributed across cores).
-    dispatchWorkers(&shared, scratches, worker_count, aligned_slice, pool_opt);
+    dispatchWorkers(&shared, scratches, worker_count, aligned_slice);
     if (shared.error_flag.load(.monotonic) != 0) return reportWorkerError(&shared);
 
     dst_off_inout.* += decompressed_size;
@@ -1112,19 +1090,10 @@ fn dispatchWorkers(
     scratches: [][]u8,
     worker_count: usize,
     slice_size_arg: usize,
-    pool_opt: ?*std.Thread.Pool,
 ) void {
     const slice_size: usize = slice_size_arg;
     if (worker_count == 1) {
         fastL14WorkerFn(shared, scratches[0], 0, shared.chunks.len);
-    } else if (pool_opt) |pool| {
-        var wg: std.Thread.WaitGroup = .{};
-        for (0..worker_count) |i| {
-            const s = i * slice_size;
-            const e = @min(s + slice_size, shared.chunks.len);
-            pool.spawnWg(&wg, fastL14WorkerFn, .{ shared, scratches[i], s, e });
-        }
-        pool.waitAndWork(&wg);
     } else {
         var threads_buf: [256]std.Thread = undefined;
         const threads = threads_buf[0..worker_count];

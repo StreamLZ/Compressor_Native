@@ -204,17 +204,22 @@ fn die(w: *std.Io.Writer, msg: []const u8) noreturn {
 
 // ─── Entry point ─────────────────────────────────────────────────────
 
-pub fn run() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn run(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const raw_args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, raw_args);
+    var args_it = try init.minimal.args.iterateAllocator(allocator);
+    defer args_it.deinit();
+    var args_list: std.ArrayList([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    while (args_it.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const raw_args = args_list.items;
 
     var stdout_buf: [4096]u8 = undefined;
-    var stdout_file = std.fs.File.stdout();
-    var stdout_writer = stdout_file.writer(&stdout_buf);
+    var stdout_file = std.Io.File.stdout();
+    var stdout_writer = stdout_file.writer(io, &stdout_buf);
     const w = &stdout_writer.interface;
     defer w.flush() catch {};
 
@@ -228,24 +233,24 @@ pub fn run() !void {
     switch (args.mode) {
         .version => try printVersion(w),
         .help => try printUsage(w),
-        .compress => try runCompress(allocator, w, args),
-        .decompress => try runDecompress(allocator, w, args),
-        .bench => try runBenchCompress(allocator, w, args),
-        .bench_decompress => try runBenchDecompress(allocator, w, args),
-        .bench_all => try runBenchAll(allocator, w, args),
-        .bench_compare => if (enable_bench) try runBenchCompare(allocator, w, args, false) else {
+        .compress => try runCompress(allocator, io, w, args),
+        .decompress => try runDecompress(allocator, io, w, args),
+        .bench => try runBenchCompress(allocator, io, w, args),
+        .bench_decompress => try runBenchDecompress(allocator, io, w, args),
+        .bench_all => try runBenchAll(allocator, io, w, args),
+        .bench_compare => if (enable_bench) try runBenchCompare(allocator, io, w, args, false) else {
             try w.writeAll("error: -bc requires building with -Dbench=true\n");
             try w.flush();
             std.process.exit(2);
         },
-        .bench_compare_fast => if (enable_bench) try runBenchCompare(allocator, w, args, true) else {
+        .bench_compare_fast => if (enable_bench) try runBenchCompare(allocator, io, w, args, true) else {
             try w.writeAll("error: -bfast requires building with -Dbench=true\n");
             try w.flush();
             std.process.exit(2);
         },
-        .forward_analyze => try runForwardAnalyze(allocator, w, args),
-        .info => try runInfo(allocator, w, args),
-        .train => try runTrain(allocator, w, args),
+        .forward_analyze => try runForwardAnalyze(allocator, io, w, args),
+        .info => try runInfo(allocator, io, w, args),
+        .train => try runTrain(allocator, io, w, args),
     }
 
     if (args.report_mem) {
@@ -315,15 +320,9 @@ fn deriveDecompressOutput(allocator: std.mem.Allocator, input: []const u8) ![]co
     return result;
 }
 
-fn readFile(allocator: std.mem.Allocator, path: []const u8, w: *std.Io.Writer) []const u8 {
+fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8, w: *std.Io.Writer) []const u8 {
     const max_bytes: usize = 1 << 31;
-    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-        w.print("error: cannot open '{s}': {s}\n", .{ path, @errorName(err) }) catch {};
-        w.flush() catch {};
-        std.process.exit(1);
-    };
-    defer file.close();
-    return file.readToEndAlloc(allocator, max_bytes) catch |err| {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, allocator, @enumFromInt(max_bytes)) catch |err| {
         w.print("error: cannot read '{s}': {s}\n", .{ path, @errorName(err) }) catch {};
         w.flush() catch {};
         std.process.exit(1);
@@ -388,7 +387,7 @@ fn fmtBytes(buf: []u8, value: usize) []const u8 {
 
 // ─── Compress ────────────────────────────────────────────────────────
 
-fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const level = args.level;
 
@@ -404,7 +403,7 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
             try w.flush();
             std.process.exit(2);
         }
-        const src = readFile(allocator, in_path, w);
+        const src = readFile(allocator, io, in_path, w);
         defer allocator.free(src);
         const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
 
@@ -447,14 +446,14 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 
     // ── SLZ compress: mmap input, mmap output ──
 
-    const in_file = std.fs.cwd().openFile(in_path, .{}) catch |err| {
+    const in_file = std.Io.Dir.cwd().openFile(io, in_path, .{}) catch |err| {
         try w.print("error: cannot open '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer in_file.close();
+    defer in_file.close(io);
 
-    const in_size = in_file.getEndPos() catch |err| {
+    const in_size = in_file.length(io) catch |err| {
         try w.print("error: cannot stat '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
@@ -504,14 +503,14 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
     const bound = encoder.compressBound(src.len);
 
     // Create output file, pre-size to compress bound, mmap for direct write.
-    const out_file = std.fs.cwd().createFile(out_path, .{ .read = true }) catch |err| {
+    const out_file = std.Io.Dir.cwd().createFile(io, out_path, .{ .read = true }) catch |err| {
         try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer out_file.close();
+    defer out_file.close(io);
 
-    out_file.setEndPos(bound) catch |err| {
+    out_file.setLength(io, bound) catch |err| {
         try w.print("error: cannot pre-size output file: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -540,7 +539,7 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
     out_map.unmap();
 
     // Truncate to actual compressed size.
-    out_file.setEndPos(written) catch |err| {
+    out_file.setLength(io, written) catch |err| {
         try w.print("error: cannot truncate output: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -554,7 +553,7 @@ fn runCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 
 // ─── Decompress ──────────────────────────────────────────────────────
 
-fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runDecompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
 
     if (args.engine != .slz) {
@@ -563,7 +562,7 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
             try w.flush();
             std.process.exit(2);
         }
-        const src = readFile(allocator, in_path, w);
+        const src = readFile(allocator, io, in_path, w);
         defer allocator.free(src);
         const threads: usize = if (args.threads == 0) @max(1, std.Thread.getCpuCount() catch 1) else args.threads;
         const level: c_int = @intCast(args.level);
@@ -609,14 +608,14 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
     // ── SLZ decompress: mmap input, mmap output ──
 
     // Open + mmap input file (read-only)
-    const in_file = std.fs.cwd().openFile(in_path, .{}) catch |err| {
+    const in_file = std.Io.Dir.cwd().openFile(io, in_path, .{}) catch |err| {
         try w.print("error: cannot open '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer in_file.close();
+    defer in_file.close(io);
 
-    const in_size = in_file.getEndPos() catch |err| {
+    const in_size = in_file.length(io) catch |err| {
         try w.print("error: cannot stat '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
@@ -661,14 +660,14 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
     const out_path = args.output orelse out_path_owned.?;
 
     // Create output file, pre-size it, and mmap for direct decompress.
-    const out_file = std.fs.cwd().createFile(out_path, .{ .read = true }) catch |err| {
+    const out_file = std.Io.Dir.cwd().createFile(io, out_path, .{ .read = true }) catch |err| {
         try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer out_file.close();
+    defer out_file.close(io);
 
-    out_file.setEndPos(out_size) catch |err| {
+    out_file.setLength(io, out_size) catch |err| {
         try w.print("error: cannot pre-size output file: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -699,7 +698,7 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
     out_map.unmap();
 
     // Truncate to exact decompressed size.
-    out_file.setEndPos(written) catch |err| {
+    out_file.setLength(io, written) catch |err| {
         try w.print("error: cannot truncate output: {s}\n", .{@errorName(err)});
         try w.flush();
         std.process.exit(1);
@@ -712,7 +711,7 @@ fn runDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !v
 
 // ─── Benchmark: compress + decompress (-b) ───────────────────────────
 
-fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runBenchCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const level = args.level;
     const runs = args.runs orelse 3;
@@ -726,7 +725,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
         die(w, "error: runs must be >= 1\n");
     }
 
-    const src = readFile(allocator, in_path, w);
+    const src = readFile(allocator, io, in_path, w);
     defer allocator.free(src);
 
     const bound = encoder.compressBound(src.len);
@@ -757,9 +756,9 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     defer allocator.free(comp_times);
     var r: u32 = 0;
     while (r < runs) : (r += 1) {
-        var timer = try std.time.Timer.start();
+        const timer_start = std.Io.Clock.awake.now(io);
         const n = try encoder.compressFramed(allocator, src, compressed, comp_opts);
-        comp_times[r] = timer.read();
+        comp_times[r] = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
         comp_size = n;
         const run_ms = @as(f64, @floatFromInt(comp_times[r])) / 1_000_000.0;
         const run_mbps = mb * 1000.0 / run_ms;
@@ -796,9 +795,9 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
     defer allocator.free(dec_times);
     r = 0;
     while (r < runs) : (r += 1) {
-        var timer = try std.time.Timer.start();
+        const timer_start = std.Io.Clock.awake.now(io);
         _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
-        dec_times[r] = timer.read();
+        dec_times[r] = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
         const run_ms = @as(f64, @floatFromInt(dec_times[r])) / 1_000_000.0;
         const run_mbps = mb * 1000.0 / run_ms;
         try w.print("  Decompress run {d}: {d:.0}ms ({d:.1} MB/s)\n", .{ r + 1, run_ms, run_mbps });
@@ -832,42 +831,55 @@ fn runBenchCompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args)
 const MemInfo = struct { peak_rss_mb: f64, commit_mb: f64 };
 
 fn getMemInfo() MemInfo {
-    const PROCESS_MEMORY_COUNTERS = extern struct {
-        cb: u32 = @sizeOf(@This()),
-        PageFaultCount: u32 = 0,
-        PeakWorkingSetSize: usize = 0,
-        WorkingSetSize: usize = 0,
-        QuotaPeakPagedPoolUsage: usize = 0,
-        QuotaPagedPoolUsage: usize = 0,
-        QuotaPeakNonPagedPoolUsage: usize = 0,
-        QuotaNonPagedPoolUsage: usize = 0,
-        PagefileUsage: usize = 0,
-        PeakPagefileUsage: usize = 0,
-    };
-    const k32 = struct {
-        extern "kernel32" fn K32GetProcessMemoryInfo(
-            hProcess: std.os.windows.HANDLE,
-            ppsmemCounters: *PROCESS_MEMORY_COUNTERS,
-            cb: u32,
-        ) callconv(.winapi) std.os.windows.BOOL;
-    };
-    var info: PROCESS_MEMORY_COUNTERS = .{};
-    if (k32.K32GetProcessMemoryInfo(std.os.windows.GetCurrentProcess(), &info, @sizeOf(PROCESS_MEMORY_COUNTERS)) != 0) {
-        return .{
-            .peak_rss_mb = @as(f64, @floatFromInt(info.PeakWorkingSetSize)) / (1024.0 * 1024.0),
-            .commit_mb = @as(f64, @floatFromInt(info.PeakPagefileUsage)) / (1024.0 * 1024.0),
+    const os = builtin.os.tag;
+    if (os == .windows) {
+        const PROCESS_MEMORY_COUNTERS = extern struct {
+            cb: u32 = @sizeOf(@This()),
+            PageFaultCount: u32 = 0,
+            PeakWorkingSetSize: usize = 0,
+            WorkingSetSize: usize = 0,
+            QuotaPeakPagedPoolUsage: usize = 0,
+            QuotaPagedPoolUsage: usize = 0,
+            QuotaPeakNonPagedPoolUsage: usize = 0,
+            QuotaNonPagedPoolUsage: usize = 0,
+            PagefileUsage: usize = 0,
+            PeakPagefileUsage: usize = 0,
         };
+        const k32 = struct {
+            extern "kernel32" fn K32GetProcessMemoryInfo(
+                hProcess: std.os.windows.HANDLE,
+                ppsmemCounters: *PROCESS_MEMORY_COUNTERS,
+                cb: u32,
+            ) callconv(.winapi) std.os.windows.BOOL;
+        };
+        var info: PROCESS_MEMORY_COUNTERS = .{};
+        if (k32.K32GetProcessMemoryInfo(std.os.windows.GetCurrentProcess(), &info, @sizeOf(PROCESS_MEMORY_COUNTERS)) != .FALSE) {
+            return .{
+                .peak_rss_mb = @as(f64, @floatFromInt(info.PeakWorkingSetSize)) / (1024.0 * 1024.0),
+                .commit_mb = @as(f64, @floatFromInt(info.PeakPagefileUsage)) / (1024.0 * 1024.0),
+            };
+        }
+    } else if (os == .linux or os == .macos or os == .ios) {
+        var usage: std.c.rusage = undefined;
+        if (std.c.getrusage(.SELF, &usage) == 0) {
+            const peak_kb: u64 = @intCast(@max(@as(i64, 0), usage.ru_maxrss));
+            const divisor: f64 = if (os == .macos or os == .ios) (1024.0 * 1024.0) else 1024.0;
+            return .{
+                .peak_rss_mb = @as(f64, @floatFromInt(peak_kb)) / divisor,
+                .commit_mb = 0,
+            };
+        }
     }
     return .{ .peak_rss_mb = 0, .commit_mb = 0 };
 }
 
 // ─── Benchmark: decompress only (-db) ────────────────────────────────
 
-fn runBenchDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runBenchDecompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const runs = args.runs orelse 10;
 
-    const src = readFile(allocator, in_path, w);
+    const src = readFile(allocator, io, in_path, w);
     defer allocator.free(src);
 
     const hdr = frame.parseHeader(src) catch |err| {
@@ -910,9 +922,9 @@ fn runBenchDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Arg
     var total_ns: u64 = 0;
     var run_i: u32 = 0;
     while (run_i < runs) : (run_i += 1) {
-        var timer = try std.time.Timer.start();
+        const timer_start = std.Io.Clock.awake.now(io);
         _ = try dec_ctx.decompress(src, dst);
-        const elapsed = timer.read();
+        const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
         if (elapsed < best_ns) best_ns = elapsed;
         total_ns += elapsed;
     }
@@ -941,7 +953,7 @@ fn runBenchDecompress(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Arg
 
 // ─── Benchmark: all levels (-ba) ─────────────────────────────────────
 
-fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runBenchAll(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const runs = args.runs orelse 3;
 
@@ -949,7 +961,7 @@ fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         die(w, "error: runs must be >= 1\n");
     }
 
-    const src = readFile(allocator, in_path, w);
+    const src = readFile(allocator, io, in_path, w);
     defer allocator.free(src);
 
     const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
@@ -987,9 +999,9 @@ fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         var best_comp_ns: u64 = std.math.maxInt(u64);
         var r: u32 = 0;
         while (r < runs) : (r += 1) {
-            var timer = try std.time.Timer.start();
+            const timer_start = std.Io.Clock.awake.now(io);
             _ = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
-            const elapsed = timer.read();
+            const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
             if (elapsed < best_comp_ns) best_comp_ns = elapsed;
         }
 
@@ -1011,9 +1023,9 @@ fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
         var best_dec_ns: u64 = std.math.maxInt(u64);
         r = 0;
         while (r < runs) : (r += 1) {
-            var timer = try std.time.Timer.start();
+            const timer_start = std.Io.Clock.awake.now(io);
             _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
-            const elapsed = timer.read();
+            const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
             if (elapsed < best_dec_ns) best_dec_ns = elapsed;
         }
 
@@ -1070,36 +1082,36 @@ fn runBenchAll(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !voi
 // ─── Benchmark: comparison vs zstd + LZ4 (-bc) ─────────────────────
 
 fn flushMemory() void {
-    const k32 = struct {
-        extern "kernel32" fn SetProcessWorkingSetSize(
-            hProcess: std.os.windows.HANDLE,
-            dwMin: usize,
-            dwMax: usize,
-        ) callconv(.winapi) std.os.windows.BOOL;
-        extern "kernel32" fn HeapCompact(
-            hHeap: std.os.windows.HANDLE,
-            dwFlags: u32,
-        ) callconv(.winapi) usize;
-        extern "kernel32" fn GetProcessHeap() callconv(.winapi) std.os.windows.HANDLE;
-    };
-    // Empty working set — all physical pages go to standby.
-    _ = k32.SetProcessWorkingSetSize(
-        std.os.windows.GetCurrentProcess(),
-        std.math.maxInt(usize),
-        std.math.maxInt(usize),
-    );
-    // Compact the CRT heap — coalesce free blocks, decommit unused pages.
-    _ = k32.HeapCompact(k32.GetProcessHeap(), 0);
+    if (builtin.os.tag == .windows) {
+        const k32 = struct {
+            extern "kernel32" fn SetProcessWorkingSetSize(
+                hProcess: std.os.windows.HANDLE,
+                dwMin: usize,
+                dwMax: usize,
+            ) callconv(.winapi) std.os.windows.BOOL;
+            extern "kernel32" fn HeapCompact(
+                hHeap: std.os.windows.HANDLE,
+                dwFlags: u32,
+            ) callconv(.winapi) usize;
+            extern "kernel32" fn GetProcessHeap() callconv(.winapi) std.os.windows.HANDLE;
+        };
+        _ = k32.SetProcessWorkingSetSize(
+            std.os.windows.GetCurrentProcess(),
+            std.math.maxInt(usize),
+            std.math.maxInt(usize),
+        );
+        _ = k32.HeapCompact(k32.GetProcessHeap(), 0);
+    }
 }
 
-fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, fast_only: bool) !void {
+fn runBenchCompare(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args, fast_only: bool) !void {
     const in_path = requireInput(args, w);
     const runs = args.runs orelse 3;
     const threads: c_int = if (args.threads > 0) @intCast(args.threads) else 8;
 
     if (runs == 0) die(w, "error: runs must be >= 1\n");
 
-    const src = readFile(allocator, in_path, w);
+    const src = readFile(allocator, io, in_path, w);
     defer allocator.free(src);
 
     const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
@@ -1149,18 +1161,18 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
             var mt_result: ?lz4.MtResult = null;
             for (0..runs) |_| {
                 if (mt_result) |*prev| prev.deinit();
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 mt_result = try lz4.compressMt(allocator, src, @intCast(threads), null);
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
                 total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
             try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
             mt_result.?.deinit();
@@ -1198,18 +1210,18 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
             var mt_result: ?lz4.MtResult = null;
             for (0..runs) |_| {
                 if (mt_result) |*prev| prev.deinit();
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 mt_result = try lz4.compressMt(allocator, src, @intCast(threads), hc_level);
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
                 total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
             try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
             mt_result.?.deinit();
@@ -1247,18 +1259,18 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
             var mt_result: ?zstd.MtResult = null;
             for (0..runs) |_| {
                 if (mt_result) |*prev| prev.deinit();
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 mt_result = try zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level);
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
                 total_compressed = mt_result.?.total_compressed;
             }
             var best_dec_ns: u64 = std.math.maxInt(u64);
             try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
             for (0..runs) |_| {
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
             mt_result.?.deinit();
@@ -1296,9 +1308,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
             var best_comp_ns: u64 = std.math.maxInt(u64);
             var comp_size: usize = warmup_size;
             for (0..runs) |_| {
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 comp_size = try encoder.compressFramed(allocator, src, compressed, opts);
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
             }
 
@@ -1311,9 +1323,9 @@ fn runBenchCompare(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args, 
             };
             var best_dec_ns: u64 = std.math.maxInt(u64);
             for (0..runs) |_| {
-                var timer = try std.time.Timer.start();
+                const timer_start = std.Io.Clock.awake.now(io);
                 _ = try dec_ctx.decompress(compressed[0..comp_size], decompressed);
-                const elapsed = timer.read();
+                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_dec_ns) best_dec_ns = elapsed;
             }
 
@@ -1373,10 +1385,10 @@ fn fmtMbps(buf: []u8, value: f64) []const u8 {
 
 // ─── Info ────────────────────────────────────────────────────────────
 
-fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runInfo(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const path = requireInput(args, w);
 
-    const data = readFile(allocator, path, w);
+    const data = readFile(allocator, io, path, w);
     defer allocator.free(data);
 
     const hdr = frame.parseHeader(data) catch |err| {
@@ -1436,21 +1448,21 @@ fn runInfo(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
 
 // ─── Forward-LZ analysis ────────────────────────────────────────────
 
-fn runForwardAnalyze(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runForwardAnalyze(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
-    const src = readFile(allocator, in_path, w);
+    const src = readFile(allocator, io, in_path, w);
     defer allocator.free(src);
 
     const mb: f64 = @as(f64, @floatFromInt(src.len)) / (1024.0 * 1024.0);
     try w.print("Forward-LZ analysis: {s} ({d} bytes, {d:.2} MB)\n\n", .{ in_path, src.len, mb });
     try w.flush();
 
-    var timer = try std.time.Timer.start();
+    const timer_start = std.Io.Clock.awake.now(io);
     const result = forward_lz.analyzeForwardLz(allocator, src) catch |err| {
         try w.print("error: forward-LZ analysis failed: {s}\n", .{@errorName(err)});
         return;
     };
-    const elapsed_ns = timer.read();
+    const elapsed_ns = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
 
     const ratio = @as(f64, @floatFromInt(result.total_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
@@ -1485,20 +1497,20 @@ fn runForwardAnalyze(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args
     }
 }
 
-fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
+fn runTrain(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args: Args) !void {
     const in_path = requireInput(args, w);
     const out_path = args.output orelse "dictionary.bin";
     const dict_size: usize = 32768;
 
     // Read all files from the input directory as training samples.
-    var dir = std.fs.cwd().openDir(in_path, .{ .iterate = true }) catch |err| {
+    var dir = std.Io.Dir.cwd().openDir(io, in_path, .{ .iterate = true }) catch |err| {
         try w.print("error: cannot open directory '{s}': {s}\n", .{ in_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    var samples: std.ArrayList([]const u8) = .{};
+    var samples: std.ArrayList([]const u8) = .empty;
     defer {
         for (samples.items) |s| allocator.free(s);
         samples.deinit(allocator);
@@ -1507,11 +1519,9 @@ fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
     var total_bytes: usize = 0;
     var file_count: usize = 0;
     var iter = dir.iterate();
-    while (iter.next() catch null) |entry| {
+    while (iter.next(io) catch null) |entry| {
         if (entry.kind != .file) continue;
-        const file = dir.openFile(entry.name, .{}) catch continue;
-        defer file.close();
-        const data = file.readToEndAlloc(allocator, 64 * 1024 * 1024) catch continue;
+        const data = dir.readFileAlloc(io, entry.name, allocator, @enumFromInt(64 * 1024 * 1024)) catch continue;
         if (data.len < 16) {
             allocator.free(data);
             continue;
@@ -1532,7 +1542,7 @@ fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
         @as(f64, @floatFromInt(total_bytes)) / 1024.0,
     });
 
-    var timer = try std.time.Timer.start();
+    const timer_start = std.Io.Clock.awake.now(io);
     var result = trainer.train(allocator, samples.items, .{
         .dict_size = dict_size,
     }) catch |err| {
@@ -1541,16 +1551,16 @@ fn runTrain(allocator: std.mem.Allocator, w: *std.Io.Writer, args: Args) !void {
         std.process.exit(1);
     };
     defer result.deinit();
-    const train_ms = @as(f64, @floatFromInt(timer.read())) / 1_000_000.0;
+    const train_ms = @as(f64, @floatFromInt(@as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds())))) / 1_000_000.0;
 
     // Write dictionary.
-    const out_file = std.fs.cwd().createFile(out_path, .{}) catch |err| {
+    const out_file = std.Io.Dir.cwd().createFile(io, out_path, .{}) catch |err| {
         try w.print("error: cannot create '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
     };
-    defer out_file.close();
-    out_file.writeAll(result.dict) catch |err| {
+    defer out_file.close(io);
+    out_file.writeStreamingAll(io, result.dict) catch |err| {
         try w.print("error: cannot write '{s}': {s}\n", .{ out_path, @errorName(err) });
         try w.flush();
         std.process.exit(1);
