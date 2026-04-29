@@ -55,7 +55,7 @@ pub fn subtractBytesUnsafe(dst: [*]u8, src: [*]const u8, len: usize, neg_offset:
 }
 
 /// Exact-length variant. Does not read past `src + len`.
-pub fn subtractBytes(dst: [*]u8, src: [*]const u8, len: usize, neg_offset: isize) void {
+pub inline fn subtractBytes(dst: [*]u8, src: [*]const u8, len: usize, neg_offset: isize) void {
     const V16 = @Vector(16, u8);
     var d = dst;
     var s = src;
