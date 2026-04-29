@@ -26,11 +26,12 @@ Zig 0.15.2 with byte-exact wire-format compatibility.
 
 ### Performance (Arrow Lake-S, 24 cores, enwik8 100 MB)
 
-- L1-L4 parallel decompress: 17-30 GB/s
-- L5 parallel decompress: 10-13 GB/s
-- L6-L8 SC group-parallel decompress: 15 GB/s
-- L9-L11 two-phase parallel decompress: 2 GB/s
-- L9 compress: 7.8 MB/s (SIMD hash probe + dual-bucket prefetch)
+- L1 parallel decompress: 29 GB/s
+- L2-L4 parallel decompress: 6-19 GB/s
+- L5 parallel decompress: 12 GB/s
+- L6-L8 SC group-parallel decompress: 10-12 GB/s
+- L9-L11 two-phase parallel decompress: 1.5-1.7 GB/s
+- L9 compress: 7.6 MB/s (SIMD hash probe + dual-bucket prefetch)
 
 ### Key optimizations over v1
 
