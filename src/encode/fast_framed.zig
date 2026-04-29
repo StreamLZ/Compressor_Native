@@ -147,10 +147,7 @@ fn fastScWorkerFn(shared: *FastScShared) void {
                 const sub_payload_start = wpos;
                 const start_pos = src_off + sub_off;
 
-                const result = (switch (shared.level) {
-                    1 => fast_enc.encodeSubChunkRaw(-2, u32, std.heap.c_allocator, &hasher, sub_src, window_base_ptr, out[sub_payload_start..], start_pos, shared.parser_config),
-                    else => unreachable,
-                }) catch {
+                const result = fast_enc.encodeSubChunkRaw(-2, u32, std.heap.c_allocator, &hasher, sub_src, window_base_ptr, out[sub_payload_start..], start_pos, shared.parser_config) catch {
                     _ = shared.error_flag.store(1, .monotonic);
                     return;
                 };

@@ -57,7 +57,13 @@ pub inline fn extendMatchForward(
         }
         s += 4;
     }
-    return if (@intFromPtr(s) < @intFromPtr(source_end)) s else source_end;
+    // Byte-by-byte tail for remaining 1-3 bytes.
+    while (@intFromPtr(s) < @intFromPtr(source_end)) {
+        const rhs_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, s, recent_offset);
+        if (s[0] != rhs_ptr[0]) break;
+        s += 1;
+    }
+    return s;
 }
 
 /// Copy bytes in 4-byte chunks (may overshoot `count` but never read past

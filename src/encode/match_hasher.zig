@@ -118,7 +118,8 @@ pub fn MatchHasher(comptime num_hash: u32, comptime dual_hash: bool) type {
         }
 
         pub fn deinit(self: *Self) void {
-            self.allocator.free(self.hash_table);
+            const aligned: []align(64) u32 = @alignCast(self.hash_table);
+            self.allocator.free(aligned);
             self.* = undefined;
         }
 
