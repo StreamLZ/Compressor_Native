@@ -51,7 +51,9 @@ pub fn findMatchesHashBased(
     const src_size = src.len;
     if (src_size < 9) return; // need at least 8 bytes for 8-byte loads
 
-    // Hash table size: bits = log2(max(src_size, 2) - 1) + 1, clamped [18, 24].
+    // Hash table size: bits = log2(src_size - 1) + 1, clamped [18, 22].
+    // Capped at 22 (256 MB) instead of 24 (1 GB) — the larger table
+    // has negligible ratio benefit but costs 4x more memory and memset.
     const raw_bits: u32 = @intCast(std.math.log2_int(u32, @intCast(@max(src_size, 2) - 1)) + 1);
     const bits: u6 = @intCast(std.math.clamp(raw_bits, 18, 24));
 

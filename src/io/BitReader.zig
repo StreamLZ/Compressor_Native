@@ -45,12 +45,35 @@ pub const BitReader = struct {
 
     pub inline fn refill(self: *BitReader) void {
         std.debug.assert(self.bit_pos <= 24);
-        while (self.bit_pos > 0) {
-            if (@intFromPtr(self.p) >= @intFromPtr(self.p_end)) break;
-            const byte: u32 = self.p[0];
-            self.bits |= byte << @intCast(self.bit_pos);
-            self.bit_pos -= 8;
-            self.p += 1;
+        // Fast path: load up to 3 bytes in one go when stream has room.
+        if (self.bit_pos > 0 and @intFromPtr(self.p) + 3 <= @intFromPtr(self.p_end)) {
+            const b0: u32 = self.p[0];
+            const b1: u32 = self.p[1];
+            const b2: u32 = self.p[2];
+            const bp: u5 = @intCast(self.bit_pos);
+            self.bits |= b0 << bp;
+            if (self.bit_pos > 8) {
+                self.bits |= b1 << @intCast(self.bit_pos - 8);
+                if (self.bit_pos > 16) {
+                    self.bits |= b2 << @intCast(self.bit_pos - 16);
+                    self.p += 3;
+                    self.bit_pos -= 24;
+                } else {
+                    self.p += 2;
+                    self.bit_pos -= 16;
+                }
+            } else {
+                self.p += 1;
+                self.bit_pos -= 8;
+            }
+        } else {
+            while (self.bit_pos > 0) {
+                if (@intFromPtr(self.p) >= @intFromPtr(self.p_end)) break;
+                const byte: u32 = self.p[0];
+                self.bits |= byte << @intCast(self.bit_pos);
+                self.bit_pos -= 8;
+                self.p += 1;
+            }
         }
     }
 
