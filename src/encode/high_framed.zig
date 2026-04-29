@@ -56,6 +56,13 @@ pub fn mapHighLevel(user_level: u8) HighMapping {
 /// `CompressBlocksSerial` / `CompressOneBlock` / `CompressChunk`.
 /// Initial scope: serial, no SC prefix table emission (treats L6-L8
 /// as non-SC for now). Full SC parity layers on in a follow-up.
+pub fn computeAdaptiveGroupSize(src_len: usize) u8 {
+    const num_chunks: usize = (src_len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const target_groups: usize = 16;
+    const ideal = @max(num_chunks / target_groups, lz_constants.sc_group_size);
+    return @intCast(@min(ideal, 255));
+}
+
 pub fn compressFramedHigh(
     allocator: std.mem.Allocator,
     src: []const u8,
@@ -65,15 +72,7 @@ pub fn compressFramedHigh(
     const mapping = mapHighLevel(opts.level);
 
     // ── Frame header ────────────────────────────────────────────────────
-    // Adaptive SC group size: larger groups for larger files to improve
-    // match window (better ratio). Target ~16 groups so parallel decode
-    // still has enough work units. Minimum 4 chunks per group.
-    const num_chunks_total: usize = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
-    const adaptive_group: u8 = blk: {
-        const target_groups: usize = 16;
-        const ideal = @max(num_chunks_total / target_groups, lz_constants.sc_group_size);
-        break :blk @intCast(@min(ideal, 255));
-    };
+    const adaptive_group = computeAdaptiveGroupSize(src.len);
 
     var pos: usize = 0;
     const hdr_len = try frame.writeHeader(dst, .{
@@ -805,6 +804,26 @@ test "mapHighLevel L11" {
     try std.testing.expectEqual(@as(i32, 9), m.codec_level);
     try std.testing.expect(!m.self_contained);
     try std.testing.expect(m.use_bt4);
+}
+
+test "computeAdaptiveGroupSize: small file keeps default" {
+    // 8MB = 31 chunks → 31/16 = 1 → max(1, 4) = 4
+    try std.testing.expectEqual(@as(u8, 4), computeAdaptiveGroupSize(8 * 1024 * 1024));
+}
+
+test "computeAdaptiveGroupSize: 100MB scales up" {
+    // 100MB = 382 chunks → 382/16 = 23 → max(23, 4) = 23
+    try std.testing.expectEqual(@as(u8, 23), computeAdaptiveGroupSize(100_000_000));
+}
+
+test "computeAdaptiveGroupSize: 1GB scales to large groups" {
+    // 1GB = 3815 chunks → 3815/16 = 238 → max(238, 4) = 238
+    try std.testing.expectEqual(@as(u8, 238), computeAdaptiveGroupSize(1_000_000_000));
+}
+
+test "computeAdaptiveGroupSize: 4GB caps at 255" {
+    // 4GB = 15259 chunks → 15259/16 = 953 → min(953, 255) = 255
+    try std.testing.expectEqual(@as(u8, 255), computeAdaptiveGroupSize(4_000_000_000));
 }
 
 test "compressFramedHigh: empty input roundtrip" {

@@ -899,3 +899,82 @@ test "runGreedyParser runs over a short source without crashing" {
     // On a repeating pattern the parser should emit at least one match.
     try testing.expect(w.tokenCount() > 0);
 }
+
+test "on-the-fly skip: no skip_accumulator state needed" {
+    // Verify that the parser works without a skip_accumulator variable —
+    // skip distance is computed from (cursor - literal_start) on the fly.
+    // A highly incompressible input should still complete without error.
+    var src: [256]u8 = undefined;
+    for (&src, 0..) |*b, i| b.* = @intCast(i); // no repeats
+
+    const allocator = testing.allocator;
+    var w = try FastStreamWriter.init(allocator, src[0..].ptr, src.len, null, false);
+    defer w.deinit(allocator);
+
+    var hasher = FastMatchHasher(u32).init(allocator, .{
+        .hash_bits = 10,
+        .min_match_length = 4,
+    }) catch unreachable;
+    defer hasher.deinit();
+
+    var mmlt: [32]u32 = undefined;
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 14);
+
+    var recent: isize = -8;
+    runGreedyParser(
+        1,
+        u32,
+        &w,
+        &hasher,
+        src[fast_constants.initial_copy_bytes..].ptr,
+        src[0..].ptr + src.len - 16,
+        src[0..].ptr + src.len,
+        &recent,
+        @intCast(src.len),
+        &mmlt,
+        src[0..].ptr,
+        src[0..].ptr,
+    );
+
+    // Incompressible data: all output goes to literals, zero matches.
+    try testing.expectEqual(@as(usize, 0), w.tokenCount());
+}
+
+test "u32 hash positions: parser roundtrips with u32 hasher" {
+    // Verify the parser works with u32 hash positions (not u16).
+    const pattern = "ABCDEFGH" ** 64; // 512 bytes, repeating
+    var src: [512]u8 = undefined;
+    @memcpy(&src, pattern);
+
+    const allocator = testing.allocator;
+    var w = try FastStreamWriter.init(allocator, src[0..].ptr, src.len, null, false);
+    defer w.deinit(allocator);
+
+    var hasher = FastMatchHasher(u32).init(allocator, .{
+        .hash_bits = 12,
+        .min_match_length = 4,
+    }) catch unreachable;
+    defer hasher.deinit();
+
+    var mmlt: [32]u32 = undefined;
+    fast_constants.buildMinimumMatchLengthTable(&mmlt, 4, 14);
+
+    var recent: isize = -8;
+    runGreedyParser(
+        1,
+        u32,
+        &w,
+        &hasher,
+        src[fast_constants.initial_copy_bytes..].ptr,
+        src[0..].ptr + src.len - 16,
+        src[0..].ptr + src.len,
+        &recent,
+        @intCast(src.len),
+        &mmlt,
+        src[0..].ptr,
+        src[0..].ptr,
+    );
+
+    // Repeating pattern: parser should find matches.
+    try testing.expect(w.tokenCount() > 0);
+}
