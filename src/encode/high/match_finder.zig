@@ -197,7 +197,10 @@ pub fn findMatchesHashBased(
                 matching_offsets &= matching_offsets - 1;
                 const offset_u: u32 = offsets_buf[bit];
                 const offset_s: usize = offset_u;
-                if (cur_pos < offset_s) continue;
+                if (cur_pos < offset_s) {
+                    @branchHint(.cold);
+                    continue;
+                }
 
                 // 4-byte prefix check at the match position.
                 const match_word: u32 = std.mem.readInt(u32, src[cur_pos - offset_s ..][0..4], .little);
@@ -205,7 +208,10 @@ pub fn findMatchesHashBased(
 
                 // Quick reject against the current best length.
                 if (best_ml >= 4) {
-                    if (cur_pos + best_ml >= src_safe4) continue;
+                    if (cur_pos + best_ml >= src_safe4) {
+                        @branchHint(.cold);
+                        continue;
+                    }
                     if (src[cur_pos + best_ml] != src[cur_pos + best_ml - offset_s]) continue;
                 }
 
@@ -236,7 +242,10 @@ pub fn findMatchesHashBased(
             MatchHasher16Dual.makeHashValue(cur_hash_tag, @intCast(cur_pos)),
         );
 
-        if (num_match == 0) continue;
+        if (num_match == 0) {
+            @branchHint(.likely);
+            continue;
+        }
 
         // Sort longest-first so the optimal parser sees best matches first.
         const match_slice = match_buf[0..num_match];
@@ -252,6 +261,7 @@ pub fn findMatchesHashBased(
         // bytes, fan out synthetic sub-matches at stride-4 and skip
         // the main loop past the end of the match.
         if (best_ml_total >= 77) {
+            @branchHint(.cold);
             // match_buf[0].length mutates — restore it after the trick.
             const saved_len = match_slice[0].length;
             const saved_off = match_slice[0].offset;
