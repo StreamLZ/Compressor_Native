@@ -46,7 +46,7 @@ The design is similar in spirit to LZ4 frames and Zstandard frames: a magic numb
 Offset  Size  Field
 ─────────────────────────────────────────
 0       4     Magic number (0x53_4C_5A_31 = "SLZ1")
-4       1     Version (must be 1; decoders must reject values > 1)
+4       1     Version (must be 2; decoders must reject unknown values)
 5       1     Flags (see below)
 6       1     Codec ID
 7       1     Compression level (1-9 codec level; user-facing levels 1-11 map to these)
@@ -98,8 +98,9 @@ The block size must be a power of 2 in the range [64 KB, 4 MB].
 ### SC Group Size (byte at offset 9)
 
 Number of 256 KB chunks per self-contained group. Must be 1-255 (0 is
-invalid). Currently always 4 in practice. Decoders must use this value,
-not a hardcoded constant, when walking SC-block group boundaries.
+invalid). Default is 4; the encoder adaptively scales this based on file
+size (targeting ~16 groups for parallel decode). Decoders must use this
+value, not a hardcoded constant, when walking SC-block group boundaries.
 
 ---
 
@@ -229,7 +230,7 @@ If the `UseChecksums` flag is set in the internal block header, 3 bytes of check
 
 ## Sidecar Block (Parallel-Decode Metadata)
 
-The sidecar block enables parallel Fast decode for L1-L5. It is an
+The sidecar block enables parallel Fast decode for L2-L5. It is an
 optional block marked with bit 30 (`ParallelDecodeMetadata`) in the
 block header's compressed_size field. Sidecar blocks have
 `decompressed_size == 0` and produce no output.
@@ -242,8 +243,9 @@ boundaries.
 ### When present
 
 The sidecar is emitted when the frame header's flag bit 4
-(`ParallelDecodeMetadataPresent`) is set. This occurs only for Fast
-codec (L1-L5) frames. High codec (L6-L11) frames never carry a
+(`ParallelDecodeMetadataPresent`) is set. This occurs only for non-SC
+Fast codec (L2-L5) frames. L1 uses SC group-parallel decode instead
+(no sidecar). High codec (L6-L11) frames never carry a
 sidecar — L6-L8 use SC group-parallel decode, and L9-L11 use two-phase
 parallel decode, neither of which requires a sidecar.
 
@@ -416,7 +418,7 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 | Constant           | Value       | Description                        |
 |--------------------|-------------|------------------------------------|
 | Magic number       | 0x534C5A31  | "SLZ1" in little-endian            |
-| Version            | 1           | Current format version             |
+| Version            | 2           | Current format version             |
 | Chunk size         | 262,144     | 256 KB                             |
 | Sub-chunk size     | 131,072     | 128 KB (Fast codec only)           |
 | Min block size     | 65,536      | 64 KB                              |
@@ -427,7 +429,7 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 | SafeSpace          | 64          | Extra bytes needed past output end |
 | Huffman LUT bits   | 11          | 2048-entry decode table            |
 | Initial copy bytes | 8           | Verbatim bytes at chunk start      |
-| SC group size      | 4           | Chunks per group in self-contained mode (default) |
+| SC group size      | 4 (default) | Chunks per group in self-contained mode; adaptive 4-255 |
 | Sidecar magic      | 0x43534450  | "PDSC" in little-endian            |
 | Sidecar version    | 2           | Current sidecar format version     |
 
@@ -439,10 +441,10 @@ The packed byte (0xF0..0xFF) is followed by `extraBits` raw bits encoding the re
 
 | Levels | Codec | Strategy | Mechanism |
 |--------|-------|----------|-----------|
-| L1     | Fast  | SC group-parallel | Encoder emits self-contained chunks. Each chunk decoded independently, no sidecar needed. Compress is also parallel (per-chunk workers). |
+| L1     | Fast  | SC group-parallel | Encoder emits self-contained chunks (1 chunk per group). Decoded via `decompressCoreParallel`. No sidecar needed. |
 | L2-L4  | Fast  | Sidecar parallel | Small sidecar (~0.15% overhead) carries cross-chunk match ops + literal leaves. Workers decode contiguous slices independently. |
 | L5     | Fast  | Sidecar parallel | Larger sidecar (~1.2% overhead) with cross-chunk source bytes at transitive depth >= 1. Workers constrained to 16-chunk slice boundaries. |
-| L6-L8  | High  | SC group-parallel | Encoder constrains chunks to self-contained groups (4 chunks / 1 MB). Each group decoded independently, no sidecar needed. |
+| L6-L8  | High  | SC group-parallel | Encoder constrains chunks to self-contained groups (adaptive size, ~16 groups per file). Each group decoded independently, no sidecar needed. |
 | L9-L11 | High  | Two-phase parallel | Phase 1: parallel entropy decode + token resolution. Phase 2: serial token execution. No sidecar (64 MB dictionary window makes cross-slice deps ubiquitous). |
 
 ### Compress
