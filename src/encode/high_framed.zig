@@ -65,6 +65,7 @@ pub fn computeAdaptiveGroupSize(src_len: usize) u8 {
 
 pub fn compressFramedHigh(
     allocator: std.mem.Allocator,
+    io: std.Io,
     src: []const u8,
     dst: []u8,
     opts: Options,
@@ -181,6 +182,7 @@ pub fn compressFramedHigh(
         const frame_block_start: usize = pos;
         const written = try compress_parallel.compressInternalParallelSc(
             allocator,
+            io,
             effective_src_g,
             dst[pos..],
             &ctx,
@@ -228,6 +230,7 @@ pub fn compressFramedHigh(
         const frame_block_start: usize = pos;
         const written = try compress_parallel.compressBlocksParallel(
             allocator,
+            io,
             effective_src_p,
             dst[pos..],
             &ctx,
@@ -829,7 +832,7 @@ test "computeAdaptiveGroupSize: 4GB caps at 255" {
 test "compressFramedHigh: empty input roundtrip" {
     const allocator = std.testing.allocator;
     var dst: [256]u8 = undefined;
-    const n = try compressFramedHigh(allocator, &.{}, &dst, .{ .level = 9 });
+    const n = try compressFramedHigh(allocator, std.testing.io, &.{}, &dst, .{ .level = 9 });
     try std.testing.expect(n > 0);
     try std.testing.expect(n < 64);
     const decoder = @import("../decode/streamlz_decoder.zig");

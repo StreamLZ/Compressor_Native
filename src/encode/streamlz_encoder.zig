@@ -46,7 +46,7 @@ pub const CompressError = error{
     BadBlockSize,
     BadScGroupSize,
     DestinationTooSmall,
-} || std.mem.Allocator.Error || fast_enc.EncodeError || std.Thread.SpawnError;
+} || std.mem.Allocator.Error || fast_enc.EncodeError;
 
 /// Compression options for `compressFramed`.
 ///
@@ -266,13 +266,26 @@ pub fn compressFramed(
     dst: []u8,
     opts: Options,
 ) CompressError!usize {
+    // Use std.Io.failing as the default io when callers don't provide
+    // one. ConcurrencyUnavailable from group.concurrent() will cause
+    // the fallback handler to run workers inline (serial execution).
+    return compressFramedWithIo(allocator, std.Io.failing, src, dst, opts);
+}
+
+pub fn compressFramedWithIo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    src: []const u8,
+    dst: []u8,
+    opts: Options,
+) CompressError!usize {
     if (opts.level < 1 or opts.level > 11) return error.BadLevel;
     if (opts.hash_bits != 0 and (opts.hash_bits < 8 or opts.hash_bits > 24)) return error.BadLevel;
     const min_dst = compressBound(src.len);
     if (dst.len < min_dst) return error.DestinationTooSmall;
 
     // Fast path: attempt the whole input in a single piece.
-    const whole = fast_framed.compressFramedOne(allocator, src, dst, opts);
+    const whole = fast_framed.compressFramedOne(allocator, io, src, dst, opts);
     if (whole) |n| return n else |err| switch (err) {
         error.OutOfMemory => {
             // Fall through to multi-piece retry below.
@@ -320,7 +333,7 @@ pub fn compressFramed(
             const piece_dst = dst[total..];
             const piece_bound = compressBound(this_piece_len);
             if (piece_dst.len < piece_bound) return error.DestinationTooSmall;
-            const piece_n = fast_framed.compressFramedOne(allocator, piece_src, piece_dst, piece_opts) catch |err| switch (err) {
+            const piece_n = fast_framed.compressFramedOne(allocator, io, piece_src, piece_dst, piece_opts) catch |err| switch (err) {
                 error.OutOfMemory => {
                     piece_ok = false;
                     break;
@@ -916,11 +929,11 @@ test "decompressFramed: decoder accepts 2 concatenated SLZ1 frames" {
     const tmp = try allocator.alloc(u8, piece0_bound + piece1_bound);
     defer allocator.free(tmp);
 
-    const n0 = try fast_framed.compressFramedOne(allocator, src[0..half], tmp, .{
+    const n0 = try fast_framed.compressFramedOne(allocator, std.testing.io, src[0..half], tmp, .{
         .level = 1,
         .self_contained = true,
     });
-    const n1 = try fast_framed.compressFramedOne(allocator, src[half..], tmp[n0..], .{
+    const n1 = try fast_framed.compressFramedOne(allocator, std.testing.io, src[half..], tmp[n0..], .{
         .level = 1,
         .self_contained = true,
     });
@@ -950,8 +963,8 @@ test "decompressFramed: multi-piece concatenation across L6 + L9 codecs" {
     const tmp = try allocator.alloc(u8, piece0_bound + piece1_bound);
     defer allocator.free(tmp);
 
-    const n0 = try fast_framed.compressFramedOne(allocator, src[0..half], tmp, .{ .level = 6 });
-    const n1 = try fast_framed.compressFramedOne(allocator, src[half..], tmp[n0..], .{ .level = 9 });
+    const n0 = try fast_framed.compressFramedOne(allocator, std.testing.io, src[0..half], tmp, .{ .level = 6 });
+    const n1 = try fast_framed.compressFramedOne(allocator, std.testing.io, src[half..], tmp[n0..], .{ .level = 9 });
     const total = n0 + n1;
 
     const decoded = try allocator.alloc(u8, src.len + decoder.safe_space);

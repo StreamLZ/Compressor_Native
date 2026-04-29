@@ -524,7 +524,7 @@ fn runCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args
 
     const dst = out_map.slice();
 
-    const written = encoder.compressFramed(allocator, src, dst, .{
+    const written = encoder.compressFramedWithIo(allocator, io, src, dst, .{
         .level = level,
         .num_threads = @intCast(threads),
         .dictionary = dict_data,
@@ -681,7 +681,7 @@ fn runDecompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, ar
 
     const dst = out_map.slice();
 
-    const dec_result = decoder.decompressFramedParallelThreaded(allocator, src, dst, args.threads) catch |err| {
+    const dec_result = decoder.decompressFramedParallelThreaded(allocator, io, src, dst, args.threads) catch |err| {
         out_map.unmap();
         try w.print("error: decompression failed: {s}\n", .{@errorName(err)});
         try w.flush();
@@ -749,7 +749,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer,
 
     // Warm-up compress.
     const comp_opts: encoder.Options = .{ .level = level, .dictionary = dict_data_b, .dictionary_id = dict_id_b, .num_threads = args.threads };
-    var comp_size: usize = try encoder.compressFramed(allocator, src, compressed, comp_opts);
+    var comp_size: usize = try encoder.compressFramedWithIo(allocator, io, src, compressed, comp_opts);
 
     // Compress benchmark.
     const comp_times = try allocator.alloc(u64, runs);
@@ -757,7 +757,7 @@ fn runBenchCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer,
     var r: u32 = 0;
     while (r < runs) : (r += 1) {
         const timer_start = std.Io.Clock.awake.now(io);
-        const n = try encoder.compressFramed(allocator, src, compressed, comp_opts);
+        const n = try encoder.compressFramedWithIo(allocator, io, src, compressed, comp_opts);
         comp_times[r] = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
         comp_size = n;
         const run_ms = @as(f64, @floatFromInt(comp_times[r])) / 1_000_000.0;
@@ -776,11 +776,8 @@ fn runBenchCompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer,
     const comp_median_mbps = mb * 1000.0 / comp_median_ms;
     try w.print("  Compress median: {d:.0}ms ({d:.1} MB/s)\n\n", .{ comp_median_ms, comp_median_mbps });
 
-    // Persistent thread pool for decompress.
-    var dec_ctx = if (args.threads > 0)
-        decoder.DecompressContext.initThreaded(allocator, args.threads)
-    else
-        decoder.DecompressContext.init(allocator);
+    // Persistent decompress context.
+    var dec_ctx = decoder.DecompressContext.initThreadedWithIo(allocator, io, args.threads);
     defer dec_ctx.deinit();
 
     // Warm-up decompress.
@@ -905,10 +902,7 @@ fn runBenchDecompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Write
     };
     defer allocator.free(dst);
 
-    var dec_ctx = if (args.threads > 0)
-        decoder.DecompressContext.initThreaded(allocator, args.threads)
-    else
-        decoder.DecompressContext.init(allocator);
+    var dec_ctx = decoder.DecompressContext.initThreadedWithIo(allocator, io, args.threads);
     defer dec_ctx.deinit();
 
     // Warm-up.
@@ -989,7 +983,8 @@ fn runBenchAll(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args
         const idx = level - 1;
 
         // Warm-up compress.
-        const comp_size = encoder.compressFramed(allocator, src, compressed, .{ .level = level }) catch |err| {
+        const comp_opts: encoder.Options = .{ .level = level, .num_threads = args.threads };
+        const comp_size = encoder.compressFramedWithIo(allocator, io, src, compressed, comp_opts) catch |err| {
             try w.print("  L{d}: compress failed: {s}\n", .{ level, @errorName(err) });
             results[idx] = .{ .level = level, .comp_size = 0, .ratio = 0, .comp_mbps = 0, .dec_mbps = 0, .pass = false };
             continue;
@@ -1000,16 +995,13 @@ fn runBenchAll(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, args
         var r: u32 = 0;
         while (r < runs) : (r += 1) {
             const timer_start = std.Io.Clock.awake.now(io);
-            _ = try encoder.compressFramed(allocator, src, compressed, .{ .level = level });
+            _ = try encoder.compressFramedWithIo(allocator, io, src, compressed, comp_opts);
             const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
             if (elapsed < best_comp_ns) best_comp_ns = elapsed;
         }
 
         // Decompress context.
-        var dec_ctx = if (args.threads > 0)
-            decoder.DecompressContext.initThreaded(allocator, args.threads)
-        else
-            decoder.DecompressContext.init(allocator);
+        var dec_ctx = decoder.DecompressContext.initThreadedWithIo(allocator, io, args.threads);
         defer dec_ctx.deinit();
 
         // Warm-up decompress.
@@ -1303,18 +1295,18 @@ fn runBenchCompare(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, 
         try w.flush();
 
         const opts: encoder.Options = .{ .level = slz_level, .num_threads = @intCast(threads) };
-        const warmup_size = encoder.compressFramed(allocator, src, compressed, opts) catch 0;
+        const warmup_size = encoder.compressFramedWithIo(allocator, io, src, compressed, opts) catch 0;
         if (warmup_size > 0) {
             var best_comp_ns: u64 = std.math.maxInt(u64);
             var comp_size: usize = warmup_size;
             for (0..runs) |_| {
                 const timer_start = std.Io.Clock.awake.now(io);
-                comp_size = try encoder.compressFramed(allocator, src, compressed, opts);
+                comp_size = try encoder.compressFramedWithIo(allocator, io, src, compressed, opts);
                 const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
                 if (elapsed < best_comp_ns) best_comp_ns = elapsed;
             }
 
-            var dec_ctx = decoder.DecompressContext.initThreaded(allocator, @intCast(threads));
+            var dec_ctx = decoder.DecompressContext.initThreadedWithIo(allocator, io, @intCast(threads));
             defer dec_ctx.deinit();
             _ = dec_ctx.decompress(compressed[0..comp_size], decompressed) catch {
                 try w.writeAll(" decompress FAILED\n");

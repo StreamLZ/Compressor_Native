@@ -30,7 +30,7 @@ pub const DecompressError = error{
     ChecksumMismatch,
     ChunkSizeMismatch,
     UnknownDictionary,
-} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.SpawnError || std.Thread.CpuCountError;
+} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.CpuCountError;
 
 /// Streams `src` (an SLZ1-framed buffer) into `dst`, returning the number
 /// of bytes written to `dst`. `dst.len` must be at least `content_size + safe_space`
@@ -41,7 +41,7 @@ pub const DecompressResult = struct {
 };
 
 pub fn decompressFramed(src: []const u8, dst: []u8) DecompressError!usize {
-    const r = try decompressFramedInner(null, src, dst, 0);
+    const r = try decompressFramedInner(null, null, src, dst, 0);
     if (r.offset > 0 and r.written > 0) {
         std.mem.copyForwards(u8, dst[0..r.written], dst[r.offset..][0..r.written]);
     }
@@ -56,7 +56,7 @@ pub fn decompressFramedParallel(
     src: []const u8,
     dst: []u8,
 ) DecompressError!usize {
-    const r = try decompressFramedInner(allocator, src, dst, 0);
+    const r = try decompressFramedInner(allocator, null, src, dst, 0);
     if (r.offset > 0 and r.written > 0) {
         std.mem.copyForwards(u8, dst[0..r.written], dst[r.offset..][0..r.written]);
     }
@@ -65,26 +65,27 @@ pub fn decompressFramedParallel(
 
 pub fn decompressFramedParallelThreaded(
     allocator: std.mem.Allocator,
+    io: ?std.Io,
     src: []const u8,
     dst: []u8,
     max_threads: usize,
 ) DecompressError!DecompressResult {
-    return decompressFramedInner(allocator, src, dst, max_threads);
+    return decompressFramedInner(allocator, io, src, dst, max_threads);
 }
 
-/// Reusable decompression context that keeps a thread pool alive across
+/// Reusable decompression context that keeps configuration across
 /// multiple `decompress` calls. Library consumers who decompress many
 /// buffers should create one context, call `decompress` repeatedly, and
-/// `deinit` when done — avoiding the ~5 ms pool init/teardown per call.
+/// `deinit` when done.
 pub const DecompressContext = struct {
     allocator: std.mem.Allocator,
-    pool: LazyPool,
+    io: ?std.Io,
     max_threads: usize,
 
     pub fn init(allocator: std.mem.Allocator) DecompressContext {
         return .{
             .allocator = allocator,
-            .pool = LazyPool.init(allocator),
+            .io = null,
             .max_threads = 0,
         };
     }
@@ -92,7 +93,15 @@ pub const DecompressContext = struct {
     pub fn initThreaded(allocator: std.mem.Allocator, max_threads: usize) DecompressContext {
         return .{
             .allocator = allocator,
-            .pool = LazyPool.init(allocator),
+            .io = null,
+            .max_threads = max_threads,
+        };
+    }
+
+    pub fn initThreadedWithIo(allocator: std.mem.Allocator, io: std.Io, max_threads: usize) DecompressContext {
+        return .{
+            .allocator = allocator,
+            .io = io,
             .max_threads = max_threads,
         };
     }
@@ -105,7 +114,7 @@ pub const DecompressContext = struct {
         while (src_pos < src.len) {
             const piece_src = src[src_pos..];
             const piece_dst = dst[dst_off..];
-            const pair = try decompressOneFrame(self.allocator, &self.pool, piece_src, piece_dst, self.max_threads);
+            const pair = try decompressOneFrame(self.allocator, self.io, piece_src, piece_dst, self.max_threads);
             src_pos += pair.src_consumed;
             if (dict_off == 0 and pair.dst_offset > 0) dict_off = pair.dst_offset;
             dst_off += pair.dst_offset + pair.dst_written;
@@ -115,39 +124,18 @@ pub const DecompressContext = struct {
     }
 
     pub fn deinit(self: *DecompressContext) void {
-        self.pool.deinit();
+        _ = self;
     }
-};
-
-/// Lazy thread pool wrapper. The pool is expensive to init (24 thread
-/// spawns ≈ 5 ms on Arrow Lake) and many decompress calls don't need
-/// it — Fast L1-L5 files and single-chunk inputs go through the serial
-/// path. Init is deferred to the first parallel dispatch so those cases
-/// pay nothing.
-const LazyPool = struct {
-    fn init(_: ?std.mem.Allocator) LazyPool {
-        return .{};
-    }
-
-    fn get(_: *LazyPool) ?*anyopaque {
-        return null;
-    }
-
-    fn deinit(_: *LazyPool) void {}
 };
 
 fn decompressFramedInner(
     allocator_opt: ?std.mem.Allocator,
+    io_opt: ?std.Io,
     src: []const u8,
     dst: []u8,
     max_threads: usize,
 ) DecompressError!DecompressResult {
     if (src.len == 0) return .{ .written = 0, .offset = 0 };
-
-    // Lazy thread pool — only init on first parallel dispatch. Fast
-    // codec inputs and single-chunk inputs skip pool init entirely.
-    var lazy_pool = LazyPool.init(allocator_opt);
-    defer lazy_pool.deinit();
 
     // Multi-piece support: the encoder's `compressFramed` retry
     // ladder (step 39) emits concatenated SLZ1 frames when the
@@ -160,7 +148,7 @@ fn decompressFramedInner(
     while (src_pos < src.len) {
         const piece_src = src[src_pos..];
         const piece_dst = dst[dst_off..];
-        const pair = try decompressOneFrame(allocator_opt, &lazy_pool, piece_src, piece_dst, max_threads);
+        const pair = try decompressOneFrame(allocator_opt, io_opt, piece_src, piece_dst, max_threads);
         src_pos += pair.src_consumed;
         if (dict_off == 0 and pair.dst_offset > 0) dict_off = pair.dst_offset;
         dst_off += pair.dst_offset + pair.dst_written;
@@ -177,7 +165,7 @@ const FrameResult = struct {
 
 fn decompressOneFrame(
     allocator_opt: ?std.mem.Allocator,
-    lazy_pool: *LazyPool,
+    io_opt: ?std.Io,
     src: []const u8,
     dst: []u8,
     max_threads: usize,
@@ -304,6 +292,11 @@ fn decompressOneFrame(
                 if (peek) |ph| {
                     const has_many_chunks = block_hdr.decompressed_size > constants.chunk_size;
                     const is_fast_like = ph.decoder_type == .fast or ph.decoder_type == .turbo;
+                    // Resolve io for parallel dispatch. When no io
+                    // is available, use std.Io.failing which causes
+                    // ConcurrencyUnavailable on dispatch, falling
+                    // back to inline (serial) execution.
+                    const io = io_opt orelse std.Io.failing;
                     if (is_fast_like and !ph.self_contained and sidecar_body != null and has_many_chunks) {
                         // v2 Fast L1-L4 parallel path: uses the pre-
                         // located sidecar to resolve cross-sub-chunk
@@ -311,7 +304,7 @@ fn decompressOneFrame(
                         // worker threads.
                         try parallel.decompressFastL14Parallel(
                             allocator,
-                            lazy_pool.get(),
+                            io,
                             block_src,
                             sidecar_body.?,
                             dst,
@@ -323,7 +316,7 @@ fn decompressOneFrame(
                     } else if (ph.self_contained and has_many_chunks) {
                         try parallel.decompressCoreParallel(
                             allocator,
-                            lazy_pool.get(),
+                            io,
                             block_src,
                             dst,
                             &dst_off,
@@ -335,7 +328,7 @@ fn decompressOneFrame(
                     } else if (ph.decoder_type == .high and has_many_chunks) {
                         const ok = try parallel.decompressCoreTwoPhase(
                             allocator,
-                            lazy_pool.get(),
+                            io,
                             block_src,
                             dst,
                             &dst_off,

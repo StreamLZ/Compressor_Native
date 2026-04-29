@@ -31,6 +31,7 @@ export fn slz_decompress(
     if (src_len == 0 or dst_len == 0) return 0;
     const result = decoder.decompressFramedParallelThreaded(
         allocator,
+        null,
         src[0..src_len],
         dst[0..dst_len],
         0,

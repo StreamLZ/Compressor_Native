@@ -6,6 +6,7 @@
 //!   const m = try slz.decompressFramed(compressed, output);
 
 pub const compressFramed = @import("encode/streamlz_encoder.zig").compressFramed;
+pub const compressFramedWithIo = @import("encode/streamlz_encoder.zig").compressFramedWithIo;
 pub const compressBound = @import("encode/streamlz_encoder.zig").compressBound;
 pub const CompressOptions = @import("encode/streamlz_encoder.zig").CompressOptions;
 

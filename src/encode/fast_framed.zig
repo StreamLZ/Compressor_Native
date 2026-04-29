@@ -209,6 +209,7 @@ fn fastScWorkerFn(shared: *FastScShared) void {
 
 fn compressFastChunksParallel(
     allocator: std.mem.Allocator,
+    io: std.Io,
     src: []const u8,
     effective_src: []const u8,
     dst_payload: []u8,
@@ -264,16 +265,13 @@ fn compressFastChunksParallel(
     if (worker_count <= 1) {
         fastScWorkerFn(&shared);
     } else {
-        const threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
-        var spawned: usize = 0;
-        while (spawned < worker_count) : (spawned += 1) {
-            threads[spawned] = std.Thread.spawn(.{}, fastScWorkerFn, .{&shared}) catch |err| {
-                for (threads[0..spawned]) |t| t.join();
-                return err;
+        var group: std.Io.Group = .init;
+        for (0..worker_count) |_| {
+            group.concurrent(io, fastScWorkerFn, .{&shared}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => fastScWorkerFn(&shared),
             };
         }
-        for (threads) |t| t.join();
+        group.await(io) catch {};
     }
 
     if (shared.error_flag.load(.monotonic) != 0) {
@@ -310,6 +308,7 @@ fn compressFastChunksParallel(
 /// multi-piece OOM retry around this function.
 pub fn compressFramedOne(
     allocator: std.mem.Allocator,
+    io: std.Io,
     src: []const u8,
     dst: []u8,
     opts: Options,
@@ -318,7 +317,7 @@ pub fn compressFramedOne(
     // BT4 match finder). Fork here so the Fast path below stays
     // byte-exact for L1-L5.
     if (opts.level >= 6) {
-        return high_framed.compressFramedHigh(allocator, src, dst, opts);
+        return high_framed.compressFramedHigh(allocator, io, src, dst, opts);
     }
 
     // ── Frame header ────────────────────────────────────────────────────
@@ -475,6 +474,7 @@ pub fn compressFramedOne(
     if (self_contained and can_compress and effective_threads > 1 and num_chunks > 1) {
         const parallel_payload_size = try compressFastChunksParallel(
             allocator,
+            io,
             src,
             effective_src,
             dst[frame_block_start..],
@@ -907,7 +907,7 @@ pub fn compressFramedOne(
 test "compressFramedOne: empty input roundtrip" {
     const allocator = std.testing.allocator;
     var dst: [256]u8 = undefined;
-    const n = try compressFramedOne(allocator, &.{}, &dst, .{ .level = 1 });
+    const n = try compressFramedOne(allocator, std.testing.io, &.{}, &dst, .{ .level = 1 });
     try std.testing.expect(n > 0);
     try std.testing.expect(n < 64);
     const decoder = @import("../decode/streamlz_decoder.zig");
@@ -924,7 +924,7 @@ test "compressFramedOne: all-equal bytes compresses small" {
     const bound = compressBound(src.len);
     const dst = try allocator.alloc(u8, bound);
     defer allocator.free(dst);
-    const n = try compressFramedOne(allocator, src, dst, .{ .level = 1 });
+    const n = try compressFramedOne(allocator, std.testing.io, src, dst, .{ .level = 1 });
     try std.testing.expect(n < 200);
     const decoder = @import("../decode/streamlz_decoder.zig");
     const dec = try allocator.alloc(u8, src.len + 64);

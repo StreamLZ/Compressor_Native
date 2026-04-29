@@ -59,7 +59,7 @@ pub const DecodeError = error{
     BlockDataTruncated,
     OutputTooSmall,
     ChunkSizeMismatch,
-} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.SpawnError || std.Thread.CpuCountError;
+} || fast.DecodeError || high.DecodeError || std.mem.Allocator.Error || std.Thread.CpuCountError;
 
 /// Describes a single 256 KB-output-sized chunk within a compressed
 /// block, annotated with its byte ranges in both input and output.
@@ -351,7 +351,7 @@ fn decodeOneChunk(
 ///   - `sc_group_size` MUST be > 0 (typically 4, from the frame header).
 pub fn decompressCoreParallel(
     allocator: std.mem.Allocator,
-    _: ?*anyopaque,
+    io: std.Io,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -433,17 +433,13 @@ pub fn decompressCoreParallel(
     if (worker_count == 1) {
         workerFn(&shared, scratches[0]);
     } else {
-        const threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
-
-        var spawned: usize = 0;
-        while (spawned < worker_count) : (spawned += 1) {
-            threads[spawned] = std.Thread.spawn(.{}, workerFn, .{ &shared, scratches[spawned] }) catch |err| {
-                for (threads[0..spawned]) |t| t.join();
-                return err;
+        var group: std.Io.Group = .init;
+        for (0..worker_count) |wi| {
+            group.concurrent(io, workerFn, .{ &shared, scratches[wi] }) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => workerFn(&shared, scratches[wi]),
             };
         }
-        for (threads) |t| t.join();
+        group.await(io) catch {};
     }
 
     if (shared.error_flag.load(.monotonic) != 0) {
@@ -654,7 +650,7 @@ fn tpPhase1OneChunk(
 ///     then use the serial decode path.
 pub fn decompressCoreTwoPhase(
     allocator: std.mem.Allocator,
-    _: ?*anyopaque,
+    io: std.Io,
     block_src: []const u8,
     dst: []u8,
     dst_off_inout: *usize,
@@ -706,10 +702,6 @@ pub fn decompressCoreTwoPhase(
     const phase1_results = try allocator.alloc(high.ChunkPhase1Result, batch_size);
     defer allocator.free(phase1_results);
 
-    // One-shot thread fallback only used when no pool is provided.
-    const threads = try allocator.alloc(std.Thread, batch_size);
-    defer allocator.free(threads);
-
     var batch_start: usize = 0;
     while (batch_start < num_chunks) {
         const batch_end = @min(batch_start + batch_size, num_chunks);
@@ -737,14 +729,13 @@ pub fn decompressCoreTwoPhase(
             tpWorkerFn(&shared);
         } else {
             const worker_count: usize = @min(batch_count, batch_size);
-            var spawned: usize = 0;
-            while (spawned < worker_count) : (spawned += 1) {
-                threads[spawned] = std.Thread.spawn(.{}, tpWorkerFn, .{&shared}) catch |err| {
-                    for (threads[0..spawned]) |t| t.join();
-                    return err;
+            var group: std.Io.Group = .init;
+            for (0..worker_count) |_| {
+                group.concurrent(io, tpWorkerFn, .{&shared}) catch |err| switch (err) {
+                    error.ConcurrencyUnavailable => tpWorkerFn(&shared),
                 };
             }
-            for (threads[0..worker_count]) |t| t.join();
+            group.await(io) catch {};
         }
 
         if (shared.error_flag.load(.monotonic) != 0) {
@@ -979,7 +970,7 @@ fn applySidecar(
 ///   to be pre-populated by a different worker's slice, causing races.
 pub fn decompressFastL14Parallel(
     allocator: std.mem.Allocator,
-    _: ?*anyopaque,
+    io: std.Io,
     block_src: []const u8,
     sidecar_body: []const u8,
     dst: []u8,
@@ -1079,13 +1070,14 @@ pub fn decompressFastL14Parallel(
     };
 
     // Sidecar literals applied inside each worker (distributed across cores).
-    dispatchWorkers(&shared, scratches, worker_count, aligned_slice);
+    dispatchWorkers(io, &shared, scratches, worker_count, aligned_slice);
     if (shared.error_flag.load(.monotonic) != 0) return reportWorkerError(&shared);
 
     dst_off_inout.* += decompressed_size;
 }
 
 fn dispatchWorkers(
+    io: std.Io,
     shared: *FastL14Shared,
     scratches: [][]u8,
     worker_count: usize,
@@ -1095,18 +1087,15 @@ fn dispatchWorkers(
     if (worker_count == 1) {
         fastL14WorkerFn(shared, scratches[0], 0, shared.chunks.len);
     } else {
-        var threads_buf: [256]std.Thread = undefined;
-        const threads = threads_buf[0..worker_count];
-        var spawned: usize = 0;
-        while (spawned < worker_count) : (spawned += 1) {
-            const s = spawned * slice_size;
+        var group: std.Io.Group = .init;
+        for (0..worker_count) |wi| {
+            const s = wi * slice_size;
             const e = @min(s + slice_size, shared.chunks.len);
-            threads[spawned] = std.Thread.spawn(.{}, fastL14WorkerFn, .{ shared, scratches[spawned], s, e }) catch {
-                shared.error_flag.store(1, .monotonic);
-                break;
+            group.concurrent(io, fastL14WorkerFn, .{ shared, scratches[wi], s, e }) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => fastL14WorkerFn(shared, scratches[wi], s, e),
             };
         }
-        for (threads[0..spawned]) |t| t.join();
+        group.await(io) catch {};
     }
 }
 

@@ -150,6 +150,7 @@ fn pcWorkerFn(shared: *PcShared) void {
 
 pub fn compressBlocksParallel(
     allocator: std.mem.Allocator,
+    io: std.Io,
     src: []const u8,
     dst_tail: []u8,
     ctx: *const high_encoder.HighEncoderContext,
@@ -203,16 +204,13 @@ pub fn compressBlocksParallel(
     if (worker_count == 1) {
         pcWorkerFn(&shared);
     } else {
-        const threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
-        var spawned: usize = 0;
-        while (spawned < worker_count) : (spawned += 1) {
-            threads[spawned] = std.Thread.spawn(.{}, pcWorkerFn, .{&shared}) catch |err| {
-                for (threads[0..spawned]) |t| t.join();
-                return err;
+        var group: std.Io.Group = .init;
+        for (0..worker_count) |_| {
+            group.concurrent(io, pcWorkerFn, .{&shared}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => pcWorkerFn(&shared),
             };
         }
-        for (threads) |t| t.join();
+        group.await(io) catch {};
     }
 
     if (shared.error_flag.load(.monotonic) != 0) {
@@ -405,6 +403,7 @@ fn scWorkerFn(shared: *ScShared) void {
 
 pub fn compressInternalParallelSc(
     allocator: std.mem.Allocator,
+    io: std.Io,
     src: []const u8,
     dst_tail: []u8,
     ctx: *const high_encoder.HighEncoderContext,
@@ -457,16 +456,13 @@ pub fn compressInternalParallelSc(
     if (worker_count == 1) {
         scWorkerFn(&shared);
     } else {
-        const threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
-        var spawned: usize = 0;
-        while (spawned < worker_count) : (spawned += 1) {
-            threads[spawned] = std.Thread.spawn(.{}, scWorkerFn, .{&shared}) catch |err| {
-                for (threads[0..spawned]) |t| t.join();
-                return err;
+        var group: std.Io.Group = .init;
+        for (0..worker_count) |_| {
+            group.concurrent(io, scWorkerFn, .{&shared}) catch |err| switch (err) {
+                error.ConcurrencyUnavailable => scWorkerFn(&shared),
             };
         }
-        for (threads) |t| t.join();
+        group.await(io) catch {};
     }
 
     if (shared.error_flag.load(.monotonic) != 0) {
