@@ -125,7 +125,10 @@ pub fn unpackOffsets(
             const cmd_a: u32 = p[0];
             p += 1;
             const nb_a: u32 = cmd_a >> 3;
-            if (nb_a > 26) return error.OffsetOutOfRange;
+            if (nb_a > 26) {
+                @branchHint(.cold);
+                return error.OffsetOutOfRange;
+            }
             const nb_a_u5: u5 = @intCast(nb_a);
             var offs_a: u32 = (8 + (cmd_a & 7)) << nb_a_u5;
             if (nb_a > 0) offs_a |= bits_a.readMoreThan24Bits(@intCast(nb_a));
@@ -137,7 +140,10 @@ pub fn unpackOffsets(
             const cmd_b: u32 = p[0];
             p += 1;
             const nb_b: u32 = cmd_b >> 3;
-            if (nb_b > 26) return error.OffsetOutOfRange;
+            if (nb_b > 26) {
+                @branchHint(.cold);
+                return error.OffsetOutOfRange;
+            }
             const nb_b_u5: u5 = @intCast(nb_b);
             var offs_b: u32 = (8 + (cmd_b & 7)) << nb_b_u5;
             if (nb_b > 0) offs_b |= bits_b.readMoreThan24BitsBackward(@intCast(nb_b));

@@ -47,6 +47,7 @@ pub const BitReader = struct {
         std.debug.assert(self.bit_pos <= 24);
         // Fast path: load up to 3 bytes in one go when stream has room.
         if (self.bit_pos > 0 and @intFromPtr(self.p) + 3 <= @intFromPtr(self.p_end)) {
+            @branchHint(.likely);
             const b0: u32 = self.p[0];
             const b1: u32 = self.p[1];
             const b2: u32 = self.p[2];
@@ -80,6 +81,7 @@ pub const BitReader = struct {
     pub inline fn refillBackwards(self: *BitReader) void {
         std.debug.assert(self.bit_pos <= 24);
         if (self.bit_pos > 0 and @intFromPtr(self.p) >= @intFromPtr(self.p_end) + 3) {
+            @branchHint(.likely);
             const b0: u32 = (self.p - 1)[0];
             const b1: u32 = (self.p - 2)[0];
             const b2: u32 = (self.p - 3)[0];
@@ -221,6 +223,7 @@ pub const BitReader = struct {
     inline fn readDistanceCore(self: *BitReader, distance_symbol: u32, comptime backwards: bool) u32 {
         var result: u32 = 0;
         if (distance_symbol < constants.high_offset_marker) {
+            @branchHint(.likely);
             const bits_to_read: u5 = @intCast((distance_symbol >> 4) + 5);
             const rotated = std.math.rotl(u32, self.bits | 1, bits_to_read);
             self.bit_pos += bits_to_read;
@@ -254,6 +257,7 @@ pub const BitReader = struct {
     inline fn readLengthCore(self: *BitReader, out: *u32, comptime backwards: bool) bool {
         const leading_zeros: u32 = @clz(self.bits);
         if (leading_zeros > 12) {
+            @branchHint(.unlikely);
             out.* = 0;
             return false;
         }

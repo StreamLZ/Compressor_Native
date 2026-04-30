@@ -432,7 +432,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
     if (@intFromPtr(dst) < @intFromPtr(dst_end)) {
         outer: while (true) {
             // ── TANS_FORWARD_BITS + round state0, state1 ──
-            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             const fw1: u32 = std.mem.readInt(u32, ptr_f[0..4], .little);
             bits_f |= fw1 << @intCast(bitpos_f);
             ptr_f += @as(usize, @intCast((31 - bitpos_f) >> 3));
@@ -445,7 +448,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e0.bits_x);
                 state0 = ((bits_f & e0.x) + e0.w) & lut_mask;
                 bits_f >>= @intCast(e0.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
             {
                 const e1 = &lut[state1];
@@ -454,10 +460,16 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e1.bits_x);
                 state1 = ((bits_f & e1.x) + e1.w) & lut_mask;
                 bits_f >>= @intCast(e1.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
 
-            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             const fw2: u32 = std.mem.readInt(u32, ptr_f[0..4], .little);
             bits_f |= fw2 << @intCast(bitpos_f);
             ptr_f += @as(usize, @intCast((31 - bitpos_f) >> 3));
@@ -470,7 +482,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e2.bits_x);
                 state2 = ((bits_f & e2.x) + e2.w) & lut_mask;
                 bits_f >>= @intCast(e2.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
 
                 const e3 = &lut[state3];
                 dst[0] = e3.symbol;
@@ -478,10 +493,16 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e3.bits_x);
                 state3 = ((bits_f & e3.x) + e3.w) & lut_mask;
                 bits_f >>= @intCast(e3.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
 
-            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_f) > @intFromPtr(src_end)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             const fw3: u32 = std.mem.readInt(u32, ptr_f[0..4], .little);
             bits_f |= fw3 << @intCast(bitpos_f);
             ptr_f += @as(usize, @intCast((31 - bitpos_f) >> 3));
@@ -494,11 +515,17 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_f -= @intCast(e4.bits_x);
                 state4 = ((bits_f & e4.x) + e4.w) & lut_mask;
                 bits_f >>= @intCast(e4.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
 
             // ── TANS_BACKWARD_BITS + round state0 ──
-            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             {
                 const back_word_le: u32 = std.mem.readInt(u32, (ptr_b - 4)[0..4], .little);
                 bits_b |= @byteSwap(back_word_le) << @intCast(bitpos_b);
@@ -513,7 +540,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e0.bits_x);
                 state0 = ((bits_b & e0.x) + e0.w) & lut_mask;
                 bits_b >>= @intCast(e0.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
 
                 const e1 = &lut[state1];
                 dst[0] = e1.symbol;
@@ -521,10 +551,16 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e1.bits_x);
                 state1 = ((bits_b & e1.x) + e1.w) & lut_mask;
                 bits_b >>= @intCast(e1.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
 
-            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             {
                 const back_word_le: u32 = std.mem.readInt(u32, (ptr_b - 4)[0..4], .little);
                 bits_b |= @byteSwap(back_word_le) << @intCast(bitpos_b);
@@ -539,7 +575,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e2.bits_x);
                 state2 = ((bits_b & e2.x) + e2.w) & lut_mask;
                 bits_b >>= @intCast(e2.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
 
                 const e3 = &lut[state3];
                 dst[0] = e3.symbol;
@@ -547,10 +586,16 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e3.bits_x);
                 state3 = ((bits_b & e3.x) + e3.w) & lut_mask;
                 bits_b >>= @intCast(e3.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
 
-            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) return error.SourceTruncated;
+            if (@intFromPtr(ptr_b) < @intFromPtr(src_start)) {
+                @branchHint(.cold);
+                return error.SourceTruncated;
+            }
             {
                 const back_word_le: u32 = std.mem.readInt(u32, (ptr_b - 4)[0..4], .little);
                 bits_b |= @byteSwap(back_word_le) << @intCast(bitpos_b);
@@ -565,7 +610,10 @@ pub fn decode(p: *TansDecoderParams) DecodeError!void {
                 bitpos_b -= @intCast(e4.bits_x);
                 state4 = ((bits_b & e4.x) + e4.w) & lut_mask;
                 bits_b >>= @intCast(e4.bits_x);
-                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) break :outer;
+                if (@intFromPtr(dst) >= @intFromPtr(dst_end)) {
+                    @branchHint(.unlikely);
+                    break :outer;
+                }
             }
         }
     }
