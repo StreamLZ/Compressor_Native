@@ -32,12 +32,11 @@ install(FILES "${ZIG_BUILD_DIR}/include/streamlz.h"
         DESTINATION include)
 
 # pkg-config
+set(PREFIX "${CMAKE_INSTALL_PREFIX}")
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/streamlz.pc.in"
     "${CMAKE_BINARY_DIR}/streamlz.pc"
     @ONLY
 )
-set(PREFIX "${CMAKE_INSTALL_PREFIX}")
-configure_file(streamlz.pc.in "${CMAKE_BINARY_DIR}/streamlz.pc" @ONLY)
 install(FILES "${CMAKE_BINARY_DIR}/streamlz.pc"
         DESTINATION lib/pkgconfig)

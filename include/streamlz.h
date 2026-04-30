@@ -5,6 +5,10 @@
  * Link against libstreamlz.a (static) or streamlz.dll/.so (dynamic).
  * Requires libc (the library uses c_allocator internally).
  *
+ * Thread Safety: All functions are completely thread-safe and re-entrant.
+ * No global state is used. You may safely call slz_compress and
+ * slz_decompress concurrently from multiple host threads.
+ *
  * Build:  zig build lib -Doptimize=ReleaseFast
  */
 
