@@ -54,8 +54,10 @@ pub const BitReader = struct {
             const bp: u5 = @intCast(self.bit_pos);
             self.bits |= b0 << bp;
             if (self.bit_pos > 8) {
+                @branchHint(.likely);
                 self.bits |= b1 << @intCast(self.bit_pos - 8);
                 if (self.bit_pos > 16) {
+                    @branchHint(.likely);
                     self.bits |= b2 << @intCast(self.bit_pos - 16);
                     self.p += 3;
                     self.bit_pos -= 24;
@@ -68,6 +70,7 @@ pub const BitReader = struct {
                 self.bit_pos -= 8;
             }
         } else {
+            @branchHint(.cold);
             while (self.bit_pos > 0) {
                 if (@intFromPtr(self.p) >= @intFromPtr(self.p_end)) break;
                 const byte: u32 = self.p[0];
@@ -88,8 +91,10 @@ pub const BitReader = struct {
             const bp: u5 = @intCast(self.bit_pos);
             self.bits |= b0 << bp;
             if (self.bit_pos > 8) {
+                @branchHint(.likely);
                 self.bits |= b1 << @intCast(self.bit_pos - 8);
                 if (self.bit_pos > 16) {
+                    @branchHint(.likely);
                     self.bits |= b2 << @intCast(self.bit_pos - 16);
                     self.p -= 3;
                     self.bit_pos -= 24;
@@ -102,6 +107,7 @@ pub const BitReader = struct {
                 self.bit_pos -= 8;
             }
         } else {
+            @branchHint(.cold);
             while (self.bit_pos > 0) {
                 if (@intFromPtr(self.p) <= @intFromPtr(self.p_end)) break;
                 self.p -= 1;

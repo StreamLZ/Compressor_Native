@@ -344,7 +344,10 @@ pub fn initLut(
                 if (upper_slot_count >= quarter_weight) {
                     var n = quarter_weight;
                     while (n != 0) : (n -= 1) {
-                        if (dst_idx >= l_usize) return error.LutConstructionFailed;
+                        if (dst_idx >= l_usize) {
+                        @branchHint(.cold);
+                        return error.LutConstructionFailed;
+                    }
                         lut[dst_idx] = le;
                         dst_idx += 1;
                         le.w +%= @intCast(what_to_add);
@@ -353,7 +356,10 @@ pub fn initLut(
                 } else {
                     var n = upper_slot_count;
                     while (n != 0) : (n -= 1) {
-                        if (dst_idx >= l_usize) return error.LutConstructionFailed;
+                        if (dst_idx >= l_usize) {
+                        @branchHint(.cold);
+                        return error.LutConstructionFailed;
+                    }
                         lut[dst_idx] = le;
                         dst_idx += 1;
                         le.w +%= @intCast(what_to_add);
@@ -365,7 +371,10 @@ pub fn initLut(
                     le.x >>= 1;
                     n = quarter_weight - upper_slot_count;
                     while (n != 0) : (n -= 1) {
-                        if (dst_idx >= l_usize) return error.LutConstructionFailed;
+                        if (dst_idx >= l_usize) {
+                        @branchHint(.cold);
+                        return error.LutConstructionFailed;
+                    }
                         lut[dst_idx] = le;
                         dst_idx += 1;
                         le.w +%= @intCast(what_to_add);
@@ -386,7 +395,10 @@ pub fn initLut(
                 if (idx > 3) return error.LutConstructionFailed;
                 bits_val &= bits_val - 1;
                 const dst_idx = pointers[idx];
-                if (dst_idx >= l_usize) return error.LutConstructionFailed;
+                if (dst_idx >= l_usize) {
+                        @branchHint(.cold);
+                        return error.LutConstructionFailed;
+                    }
                 const weight_bits: u32 = std.math.log2_int(u32, @intCast(ww));
                 const bits_per_symbol_inner: u5 = @intCast(@as(i32, @intCast(log_table_bits)) - @as(i32, @intCast(weight_bits)));
                 lut[dst_idx] = .{
