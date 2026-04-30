@@ -164,7 +164,7 @@ pub const BitReader = struct {
         return self.readMoreThan24BitsCore(n, true);
     }
 
-    inline fn readMoreThan24BitsCore(self: *BitReader, n: u6, backwards: bool) u32 {
+    inline fn readMoreThan24BitsCore(self: *BitReader, n: u6, comptime backwards: bool) u32 {
         std.debug.assert(n > 0 and n <= 32);
         var rv: u32 = 0;
         if (n <= 24) {
@@ -218,7 +218,7 @@ pub const BitReader = struct {
         return self.readDistanceCore(distance_symbol, true);
     }
 
-    fn readDistanceCore(self: *BitReader, distance_symbol: u32, backwards: bool) u32 {
+    inline fn readDistanceCore(self: *BitReader, distance_symbol: u32, comptime backwards: bool) u32 {
         var result: u32 = 0;
         if (distance_symbol < constants.high_offset_marker) {
             const bits_to_read: u5 = @intCast((distance_symbol >> 4) + 5);
@@ -251,7 +251,7 @@ pub const BitReader = struct {
         return self.readLengthCore(out, true);
     }
 
-    fn readLengthCore(self: *BitReader, out: *u32, backwards: bool) bool {
+    inline fn readLengthCore(self: *BitReader, out: *u32, comptime backwards: bool) bool {
         const leading_zeros: u32 = @clz(self.bits);
         if (leading_zeros > 12) {
             out.* = 0;
