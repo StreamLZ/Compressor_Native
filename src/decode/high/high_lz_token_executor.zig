@@ -354,6 +354,9 @@ pub fn resolveTokens(
     var dst_pos: i32 = 0;
     var token_index: u32 = 0;
 
+    asm volatile (".p2align 6");
+    asm volatile ("nop");
+    asm volatile (".p2align 5");
     while (@intFromPtr(cmd_stream) < @intFromPtr(cmd_stream_end)) {
         const command_byte: u32 = cmd_stream[0];
         cmd_stream += 1;
@@ -525,6 +528,9 @@ fn executeTokensType1(
     // the hot path.
     const safe_end: u32 = if (token_count > prefetch_ahead) token_count - prefetch_ahead else 0;
     var i: u32 = 0;
+    asm volatile (".p2align 6");
+    asm volatile ("nop");
+    asm volatile (".p2align 5");
     while (i < safe_end) : (i += 1) {
         // Match-source prefetch for a token prefetch_ahead steps ahead —
         // unconditional in this loop body.
