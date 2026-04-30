@@ -423,8 +423,7 @@ fn processModeImpl(
             recent_offs = if (use_new_dist) candidate_offs else recent_offs;
             off16_stream = @ptrFromInt(@intFromPtr(off16_stream) + (@as(usize, @intFromBool(use_new_dist)) * 2));
 
-            const match_addr_usize: usize = @intFromPtr(dst) +% @as(usize, @bitCast(@as(isize, @intCast(recent_offs))));
-            const match_ptr: [*]const u8 = @ptrFromInt(match_addr_usize);
+            const match_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, dst, @as(isize, @intCast(recent_offs)));
             copy.copy64(dst, match_ptr);
             copy.copy64(dst + 8, match_ptr + 8);
             dst += (cmd >> 3) & 0xF;
