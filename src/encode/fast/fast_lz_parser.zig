@@ -67,7 +67,7 @@ pub fn runGreedyParser(
     recent_offset_inout: *isize,
     _: u32,
     min_match_length_table: *const [32]u32,
-    source_block_base: [*]const u8,
+    _: [*]const u8,
     window_base: [*]const u8,
 ) void {
     // Hoist into locals.
@@ -110,6 +110,7 @@ pub fn runGreedyParser(
     }
 
     outer: while (true) {
+        // ── Hash probe ──
         const bytes_at_cursor: u32 = std.mem.readInt(u32, source_cursor[0..4], .little);
         const word_at_cursor: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
         const hash_index: usize = @intCast((word_at_cursor *% hash_mult) >> hash_shift);
@@ -119,144 +120,68 @@ pub fn runGreedyParser(
         const cur_pos_t: T = @truncate(cur_pos_in_window);
         hash_table[hash_index] = cur_pos_t;
 
-        // Content-compare first (like lzturbo): compute match address
-        // additively so underflow is impossible, then compare 4 bytes.
-        // Offset validity is checked only on content hits (rare path).
+        // ── Content compare (fast reject) ──
         const match_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(window_base) + stored_pos_t);
         const candidate_word: u32 = std.mem.readInt(u32, match_ptr[0..4], .little);
 
-        var found_match = false;
         var offset_or_recent: u32 = 0;
         var current_offset: isize = 0;
         var match_end: [*]const u8 = undefined;
 
         if (bytes_at_cursor == candidate_word) {
-            // Content matches — now validate the offset (rare path).
             const offset_candidate: u32 = cur_pos_t -% stored_pos_t;
             if (offset_candidate >= 8 and offset_candidate <= cur_pos_in_window) {
                 const match_len_raw: usize = @intFromPtr(
                     token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -@as(isize, @intCast(offset_candidate))),
                 ) - @intFromPtr(source_cursor);
                 const log2_idx: u5 = @intCast(@clz(offset_candidate));
-                const min_len: u32 = min_match_length_table[log2_idx];
-                if (match_len_raw >= min_len) {
+                if (match_len_raw >= min_match_length_table[log2_idx]) {
                     offset_or_recent = offset_candidate;
                     current_offset = -@as(isize, @intCast(offset_candidate));
                     match_end = source_cursor + match_len_raw;
-                    found_match = true;
+                    emitMatch(T, level, w, token_writer, hash_table, hash_mult, hash_shift, window_base, &source_cursor, &literal_start, &recent_offset, match_end, offset_or_recent, current_offset);
+                    if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) break :outer;
+                    continue :outer;
                 }
             }
         }
 
-        if (!found_match) {
-            // Recent-offset candidate.
-            const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
-            const recent_word: u32 = std.mem.readInt(u32, recent_src_ptr[0..4], .little);
-            const xor_value: u32 = bytes_at_cursor ^ recent_word;
+        // ── Secondary match attempts ──
+        const recent_src_ptr: [*]const u8 = ptr_math.offsetPtr([*]const u8, source_cursor, recent_offset);
+        const xor_value: u32 = bytes_at_cursor ^ std.mem.readInt(u32, recent_src_ptr[0..4], .little);
 
-            if ((xor_value & 0xFFFFFF00) == 0) {
-                source_cursor += 1;
-                offset_or_recent = 0;
-                const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
-                const word2: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
-                const hi2: usize = @intCast((word2 *% hash_mult) >> hash_shift);
-                hash_table[hi2] = @truncate(pos2);
+        if ((xor_value & 0xFFFFFF00) == 0) {
+            source_cursor += 1;
+            const pos2: usize = @intFromPtr(source_cursor) - @intFromPtr(window_base);
+            const word2: u64 = std.mem.readInt(u64, source_cursor[0..8], .little);
+            hash_table[@intCast((word2 *% hash_mult) >> hash_shift)] = @truncate(pos2);
+            current_offset = recent_offset;
+            match_end = token_writer.extendMatchForward(source_cursor + 3, safe_source_end, current_offset);
+        } else if (bytes_at_cursor == std.mem.readInt(u32, @as([*]const u8, @ptrFromInt(@intFromPtr(source_cursor) -% 8))[0..4], .little)) {
+            offset_or_recent = 8;
+            current_offset = -8;
+            match_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -8);
+        } else if (comptime level >= 2) {
+            if ((xor_value & 0xFFFF) == 0) {
                 current_offset = recent_offset;
-                match_end = token_writer.extendMatchForward(source_cursor + 3, safe_source_end, current_offset);
-                found_match = true;
+                match_end = source_cursor + @as(usize, if ((xor_value & 0xFFFFFF) == 0) 3 else 2);
             } else {
-                // Fallback: offset-8 match.
-                const off8_src_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) -% 8);
-                const off8_word: u32 = std.mem.readInt(u32, off8_src_ptr[0..4], .little);
-                if (bytes_at_cursor == off8_word) {
-                    offset_or_recent = 8;
-                    current_offset = -8;
-                    match_end = token_writer.extendMatchForward(source_cursor + 4, safe_source_end, -8);
-                    found_match = true;
-                }
-
-                // Level >= 2: try 2/3-byte recent match.
-                if (comptime level >= 2) {
-                    if (!found_match and (xor_value & 0xFFFF) == 0) {
-                        offset_or_recent = 0;
-                        current_offset = recent_offset;
-                        const extra: usize = if ((xor_value & 0xFFFFFF) == 0) 3 else 2;
-                        match_end = source_cursor + extra;
-                        found_match = true;
-                    }
-                }
+                const dist: usize = @intFromPtr(source_cursor) - @intFromPtr(literal_start);
+                const step: usize = if (dist < 128) 1 else @min((dist >> 7) + 1, 16);
+                if (@intFromPtr(safe_source_end) - 5 - @intFromPtr(source_cursor) <= step) break :outer;
+                source_cursor += step;
+                continue :outer;
             }
-        }
-
-        if (!found_match) {
-            @branchHint(.unlikely);
+        } else {
             const dist: usize = @intFromPtr(source_cursor) - @intFromPtr(literal_start);
             const step: usize = if (dist < 128) 1 else @min((dist >> 7) + 1, 16);
-            const remaining: usize = @intFromPtr(safe_source_end) - 5 - @intFromPtr(source_cursor);
-            if (remaining <= step) break :outer;
+            if (@intFromPtr(safe_source_end) - 5 - @intFromPtr(source_cursor) <= step) break :outer;
             source_cursor += step;
             continue :outer;
         }
 
-        // Extend match backward into the literal run. Bounds
-        // the extension with:
-        //   (sourceBlock - sourceCursor) + hasherBaseAdjustment < currentOffset
-        // With hasherBaseAdjustment = SrcBaseOffset - blockBasePosition = -startPos,
-        // and sourceBlock = the current SUB-CHUNK base pointer, this simplifies to
-        //   -(absolutePos) < currentOffset ⟺ absolutePos > |offset|
-        // i.e., the bound is the WHOLE-INPUT base (`window_base`), NOT the sub-chunk
-        // base. Cross-sub-chunk backward extension is legal because earlier sub-chunks
-        // already exist in the output buffer by the time the decoder processes the
-        // current one.
-        while (@intFromPtr(source_cursor) > @intFromPtr(literal_start)) {
-            const cursor_prev_addr: usize = @intFromPtr(source_cursor) - 1;
-            const back_match_addr: usize = cursor_prev_addr +% @as(usize, @bitCast(current_offset));
-            if (back_match_addr < @intFromPtr(window_base)) break;
-            const cur_byte: u8 = @as([*]const u8, @ptrFromInt(cursor_prev_addr))[0];
-            const back_byte: u8 = @as([*]const u8, @ptrFromInt(back_match_addr))[0];
-            if (cur_byte != back_byte) break;
-            source_cursor -= 1;
-        }
-
-        const match_length: u32 = @intCast(@intFromPtr(match_end) - @intFromPtr(source_cursor));
-        const lit_run_length: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
-
-        if (comptime trace_tokens) {
-            const src_pos: usize = @intFromPtr(source_cursor) - @intFromPtr(source_block_base);
-            std.debug.print("[tok] pos={d} lit={d} mlen={d} off={d} curOff={d}\n", .{
-                src_pos, lit_run_length, match_length, offset_or_recent, current_offset,
-            });
-        }
-
-        token_writer.writeOffset(
-            w,
-            match_length,
-            lit_run_length,
-            offset_or_recent,
-            recent_offset,
-            literal_start,
-        );
-
-        literal_start = match_end;
-        source_cursor = match_end;
-        recent_offset = current_offset;
-
+        emitMatch(T, level, w, token_writer, hash_table, hash_mult, hash_shift, window_base, &source_cursor, &literal_start, &recent_offset, match_end, offset_or_recent, current_offset);
         if (@intFromPtr(source_cursor) + 5 >= @intFromPtr(safe_source_end)) break :outer;
-
-        // Level ≥ 2: rehash match interior at exponential intervals.
-        // Stored positions are in WHOLE-INPUT coordinates (window_base).
-        if (comptime level >= 2) {
-            const match_start_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(source_cursor) - match_length);
-            var i: u32 = 1;
-            while (i < match_length) : (i *%= 2) {
-                const rehash_ptr = match_start_ptr + i;
-                const rw: u64 = std.mem.readInt(u64, rehash_ptr[0..8], .little);
-                const rh: usize = @intCast((rw *% hash_mult) >> hash_shift);
-                const rpos: usize = @intFromPtr(rehash_ptr) - @intFromPtr(window_base);
-                hash_table[rh] = @truncate(rpos);
-                if (i >= match_length) break;
-            }
-        }
     }
 
     token_writer.copyTrailingLiterals(w, literal_start, source_end, recent_offset);
@@ -318,6 +243,66 @@ inline fn isMatchBetter(match_length: i32, match_offset: i32, best_length: i32, 
 inline fn isBetterThanRecentMatch(recent_match_length: i32, match_length: i32, match_offset: i32) bool {
     return recent_match_length < 2 or
         (recent_match_length + 1 < match_length and (recent_match_length + 4 < match_length or match_offset < 65536));
+}
+
+inline fn emitMatch(
+    comptime T: type,
+    comptime level: comptime_int,
+    w: *FastStreamWriter,
+    comptime tw: type,
+    hash_table: []T,
+    hash_mult: u64,
+    hash_shift: u6,
+    window_base: [*]const u8,
+    source_cursor_ptr: *[*]const u8,
+    literal_start_ptr: *[*]const u8,
+    recent_offset_ptr: *isize,
+    match_end: [*]const u8,
+    offset_or_recent: u32,
+    current_offset: isize,
+) void {
+    var source_cursor = source_cursor_ptr.*;
+    const literal_start = literal_start_ptr.*;
+    const recent_offset = recent_offset_ptr.*;
+
+    while (@intFromPtr(source_cursor) > @intFromPtr(literal_start)) {
+        const cursor_prev_addr: usize = @intFromPtr(source_cursor) - 1;
+        const back_match_addr: usize = cursor_prev_addr +% @as(usize, @bitCast(current_offset));
+        if (back_match_addr < @intFromPtr(window_base)) break;
+        const cur_byte: u8 = @as([*]const u8, @ptrFromInt(cursor_prev_addr))[0];
+        const back_byte: u8 = @as([*]const u8, @ptrFromInt(back_match_addr))[0];
+        if (cur_byte != back_byte) break;
+        source_cursor -= 1;
+    }
+
+    const match_length: u32 = @intCast(@intFromPtr(match_end) - @intFromPtr(source_cursor));
+    const lit_run_length: u32 = @intCast(@intFromPtr(source_cursor) - @intFromPtr(literal_start));
+
+    tw.writeOffset(
+        w,
+        match_length,
+        lit_run_length,
+        offset_or_recent,
+        recent_offset,
+        literal_start,
+    );
+
+    if (comptime level >= 2) {
+        const match_start_ptr: [*]const u8 = @ptrFromInt(@intFromPtr(match_end) - match_length);
+        var i: u32 = 1;
+        while (i < match_length) : (i *%= 2) {
+            const rehash_ptr = match_start_ptr + i;
+            const rw: u64 = std.mem.readInt(u64, rehash_ptr[0..8], .little);
+            const rh: usize = @intCast((rw *% hash_mult) >> hash_shift);
+            const rpos: usize = @intFromPtr(rehash_ptr) - @intFromPtr(window_base);
+            hash_table[rh] = @truncate(rpos);
+            if (i >= match_length) break;
+        }
+    }
+
+    source_cursor_ptr.* = match_end;
+    literal_start_ptr.* = match_end;
+    recent_offset_ptr.* = current_offset;
 }
 
 /// Is the lazy candidate worth the step delay over `current`?
