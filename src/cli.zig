@@ -1141,142 +1141,248 @@ fn runBenchCompare(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, 
     const decompressed = try allocator.alloc(u8, src.len + decoder.safe_space);
     defer allocator.free(decompressed);
 
-    // ── LZ4 default (MT, 4 MB blocks like the CLI) ──
+    // ── LZ4 default ──
     {
-        try w.writeAll("  LZ4 MT ...");
+        const is_single = threads == 1;
+        const lz4_label: []const u8 = if (is_single) "LZ4" else "LZ4 MT";
+        try w.print("  {s} ...", .{lz4_label});
         try w.flush();
-        var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), null) catch null;
-        if (warmup_result) |*wr| {
-            wr.deinit();
-            var best_comp_ns: u64 = std.math.maxInt(u64);
-            var total_compressed: usize = 0;
-            var mt_result: ?lz4.MtResult = null;
-            for (0..runs) |_| {
-                if (mt_result) |*prev| prev.deinit();
-                const timer_start = std.Io.Clock.awake.now(io);
-                mt_result = try lz4.compressMt(allocator, src, @intCast(threads), null);
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_comp_ns) best_comp_ns = elapsed;
-                total_compressed = mt_result.?.total_compressed;
+        if (is_single) {
+            const comp_size = lz4.compress(compressed, src) catch 0;
+            if (comp_size > 0) {
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try lz4.compress(compressed, src);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                }
+                _ = try lz4.decompress(decompressed[0..src.len], compressed[0..comp_size], src.len);
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try lz4.decompress(decompressed[0..src.len], compressed[0..comp_size], src.len);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(lz4_label);
+                results[result_count].comp_size = comp_size;
+                results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
             }
-            var best_dec_ns: u64 = std.math.maxInt(u64);
-            try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-            for (0..runs) |_| {
-                const timer_start = std.Io.Clock.awake.now(io);
-                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_dec_ns) best_dec_ns = elapsed;
-            }
-            mt_result.?.deinit();
-            const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
-            const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
-            results[result_count].setName("LZ4 MT");
-            results[result_count].comp_size = total_compressed;
-            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
-            results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
-            results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
-            result_count += 1;
-            try w.writeAll(" done\n");
         } else {
-            try w.writeAll(" FAILED\n");
+            var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), null) catch null;
+            if (warmup_result) |*wr| {
+                wr.deinit();
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                var total_compressed: usize = 0;
+                var mt_result: ?lz4.MtResult = null;
+                for (0..runs) |_| {
+                    if (mt_result) |*prev| prev.deinit();
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    mt_result = try lz4.compressMt(allocator, src, @intCast(threads), null);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                    total_compressed = mt_result.?.total_compressed;
+                }
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                mt_result.?.deinit();
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(lz4_label);
+                results[result_count].comp_size = total_compressed;
+                results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
+            }
         }
         try w.flush();
     }
 
     flushMemory();
 
-    // ── LZ4 HC levels 4, 9, 12 (MT, 4 MB blocks) ──
+    // ── LZ4 HC levels ──
     const lz4_hc_levels_fast = [_]c_int{9};
     const lz4_hc_levels_full = [_]c_int{ 4, 9, 12 };
     const lz4_hc_levels: []const c_int = if (fast_only) &lz4_hc_levels_fast else &lz4_hc_levels_full;
     for (lz4_hc_levels) |hc_level| {
         var name_buf: [16]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "LZ4 HC {d} MT", .{hc_level}) catch "LZ4 HC ?";
+        const is_single = threads == 1;
+        const name = if (is_single)
+            std.fmt.bufPrint(&name_buf, "LZ4 HC {d}", .{hc_level}) catch "LZ4 HC ?"
+        else
+            std.fmt.bufPrint(&name_buf, "LZ4 HC {d} MT", .{hc_level}) catch "LZ4 HC ?";
         try w.print("  {s} ...", .{name});
         try w.flush();
-        var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), hc_level) catch null;
-        if (warmup_result) |*wr| {
-            wr.deinit();
-            var best_comp_ns: u64 = std.math.maxInt(u64);
-            var total_compressed: usize = 0;
-            var mt_result: ?lz4.MtResult = null;
-            for (0..runs) |_| {
-                if (mt_result) |*prev| prev.deinit();
-                const timer_start = std.Io.Clock.awake.now(io);
-                mt_result = try lz4.compressMt(allocator, src, @intCast(threads), hc_level);
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_comp_ns) best_comp_ns = elapsed;
-                total_compressed = mt_result.?.total_compressed;
+        if (is_single) {
+            const comp_size = lz4.compressHc(compressed, src, hc_level) catch 0;
+            if (comp_size > 0) {
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try lz4.compressHc(compressed, src, hc_level);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                }
+                _ = try lz4.decompress(decompressed[0..src.len], compressed[0..comp_size], src.len);
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try lz4.decompress(decompressed[0..src.len], compressed[0..comp_size], src.len);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(name);
+                results[result_count].comp_size = comp_size;
+                results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
             }
-            var best_dec_ns: u64 = std.math.maxInt(u64);
-            try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-            for (0..runs) |_| {
-                const timer_start = std.Io.Clock.awake.now(io);
-                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_dec_ns) best_dec_ns = elapsed;
-            }
-            mt_result.?.deinit();
-            const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
-            const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
-            results[result_count].setName(name);
-            results[result_count].comp_size = total_compressed;
-            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
-            results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
-            results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
-            result_count += 1;
-            try w.writeAll(" done\n");
         } else {
-            try w.writeAll(" FAILED\n");
+            var warmup_result = lz4.compressMt(allocator, src, @intCast(threads), hc_level) catch null;
+            if (warmup_result) |*wr| {
+                wr.deinit();
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                var total_compressed: usize = 0;
+                var mt_result: ?lz4.MtResult = null;
+                for (0..runs) |_| {
+                    if (mt_result) |*prev| prev.deinit();
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    mt_result = try lz4.compressMt(allocator, src, @intCast(threads), hc_level);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                    total_compressed = mt_result.?.total_compressed;
+                }
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    try lz4.decompressMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                mt_result.?.deinit();
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(name);
+                results[result_count].comp_size = total_compressed;
+                results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
+            }
         }
         try w.flush();
     }
 
     flushMemory();
 
-    // ── zstd levels 1, 3, 9, 19 (MT block-parallel, 4 MB blocks) ──
+    // ── zstd levels ──
     const zstd_levels_fast = [_]c_int{ 1, 3, 19 };
     const zstd_levels_full = [_]c_int{ 1, 3, 9, 19 };
     const zstd_levels: []const c_int = if (fast_only) &zstd_levels_fast else &zstd_levels_full;
     for (zstd_levels) |zstd_level| {
         var name_buf: [16]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "zstd {d} MT", .{zstd_level}) catch "zstd ?";
+        const is_single = threads == 1;
+        const name = if (is_single)
+            std.fmt.bufPrint(&name_buf, "zstd {d}", .{zstd_level}) catch "zstd ?"
+        else
+            std.fmt.bufPrint(&name_buf, "zstd {d} MT", .{zstd_level}) catch "zstd ?";
         try w.print("  {s} ...", .{name});
         try w.flush();
-        var warmup_result = zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level) catch null;
-        if (warmup_result) |*wr| {
-            wr.deinit();
-            var best_comp_ns: u64 = std.math.maxInt(u64);
-            var total_compressed: usize = 0;
-            var mt_result: ?zstd.MtResult = null;
-            for (0..runs) |_| {
-                if (mt_result) |*prev| prev.deinit();
-                const timer_start = std.Io.Clock.awake.now(io);
-                mt_result = try zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level);
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_comp_ns) best_comp_ns = elapsed;
-                total_compressed = mt_result.?.total_compressed;
+        if (is_single) {
+            const comp_size = zstd.compress(compressed, src, zstd_level) catch 0;
+            if (comp_size > 0) {
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try zstd.compress(compressed, src, zstd_level);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                }
+                _ = try zstd.decompress(decompressed[0..src.len], compressed[0..comp_size]);
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    _ = try zstd.decompress(decompressed[0..src.len], compressed[0..comp_size]);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(name);
+                results[result_count].comp_size = comp_size;
+                results[result_count].ratio = @as(f64, @floatFromInt(comp_size)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
             }
-            var best_dec_ns: u64 = std.math.maxInt(u64);
-            try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-            for (0..runs) |_| {
-                const timer_start = std.Io.Clock.awake.now(io);
-                try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
-                const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
-                if (elapsed < best_dec_ns) best_dec_ns = elapsed;
-            }
-            mt_result.?.deinit();
-            const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
-            const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
-            results[result_count].setName(name);
-            results[result_count].comp_size = total_compressed;
-            results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
-            results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
-            results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
-            result_count += 1;
-            try w.writeAll(" done\n");
         } else {
-            try w.writeAll(" FAILED\n");
+            var warmup_result = zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level) catch null;
+            if (warmup_result) |*wr| {
+                wr.deinit();
+                var best_comp_ns: u64 = std.math.maxInt(u64);
+                var total_compressed: usize = 0;
+                var mt_result: ?zstd.MtResult = null;
+                for (0..runs) |_| {
+                    if (mt_result) |*prev| prev.deinit();
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    mt_result = try zstd.compressBlocksMt(allocator, src, @intCast(threads), zstd_level);
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_comp_ns) best_comp_ns = elapsed;
+                    total_compressed = mt_result.?.total_compressed;
+                }
+                var best_dec_ns: u64 = std.math.maxInt(u64);
+                try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                for (0..runs) |_| {
+                    const timer_start = std.Io.Clock.awake.now(io);
+                    try zstd.decompressBlocksMt(allocator, src, decompressed[0..src.len], &mt_result.?, @intCast(threads));
+                    const elapsed = @as(u64, @intCast(timer_start.untilNow(io, .awake).toNanoseconds()));
+                    if (elapsed < best_dec_ns) best_dec_ns = elapsed;
+                }
+                mt_result.?.deinit();
+                const comp_ms = @as(f64, @floatFromInt(best_comp_ns)) / 1_000_000.0;
+                const dec_ms = @as(f64, @floatFromInt(best_dec_ns)) / 1_000_000.0;
+                results[result_count].setName(name);
+                results[result_count].comp_size = total_compressed;
+                results[result_count].ratio = @as(f64, @floatFromInt(total_compressed)) / @as(f64, @floatFromInt(src.len)) * 100.0;
+                results[result_count].comp_mbps = mb * 1000.0 / comp_ms;
+                results[result_count].dec_mbps = mb * 1000.0 / dec_ms;
+                result_count += 1;
+                try w.writeAll(" done\n");
+            } else {
+                try w.writeAll(" FAILED\n");
+            }
         }
         try w.flush();
     }
@@ -1357,10 +1463,14 @@ fn runBenchCompare(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, 
         });
     }
 
-    try w.print("\nThreading ({d} threads, 4 MB independent blocks):\n", .{threads});
-    try w.writeAll("  LZ4:      compress MT, decompress MT\n");
-    try w.writeAll("  zstd:     compress MT, decompress MT\n");
-    try w.writeAll("  StreamLZ: compress MT (L1, L6+), decompress MT (all levels)\n");
+    if (threads == 1) {
+        try w.writeAll("\nSingle-threaded: all compressors use full-stream mode (no block splitting).\n");
+    } else {
+        try w.print("\nThreading ({d} threads, 4 MB independent blocks):\n", .{threads});
+        try w.writeAll("  LZ4:      compress MT, decompress MT\n");
+        try w.writeAll("  zstd:     compress MT, decompress MT\n");
+        try w.writeAll("  StreamLZ: compress MT (L1, L6+), decompress MT (all levels)\n");
+    }
 }
 
 fn fmtMbps(buf: []u8, value: f64) []const u8 {

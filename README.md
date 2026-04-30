@@ -54,63 +54,52 @@ before running tests.
 
 ## Benchmarks
 
-Intel Core Ultra 9 285K (Arrow Lake-S), Windows 11, `-Doptimize=ReleaseFast`.
-Corpus: enwik8 (100 MB English text). Best of 3 runs.
+Intel Core Ultra 9 285K (Arrow Lake-S), Windows 11, Zig 0.16 / LLVM 21,
+`-Doptimize=ReleaseFast`. Best of 3 runs.
 
 ### vs zstd and LZ4 (single-threaded, enwik8)
 
-Single-threaded comparison. All use independent 4 MB blocks.
+Single-threaded comparison. All compressors use full-stream mode (no block splitting).
 
 | Compressor | Ratio | Compress | Decompress |
 |-----------|-------|----------|------------|
-| LZ4       | 57.3% |     671 MB/s |  4,802 MB/s |
-| LZ4 HC 9  | 42.3% |    52.1 MB/s |  4,674 MB/s |
-| zstd 1    | 40.7% |     501 MB/s |  2,072 MB/s |
-| zstd 3    | 35.6% |     297 MB/s |  2,007 MB/s |
-| zstd 9    | 31.8% |    75.8 MB/s |  2,067 MB/s |
-| zstd 19   | 29.0% |     4.2 MB/s |  1,962 MB/s |
-| **SLZ L1**  | 54.9% |     407 MB/s |  **6,559 MB/s** |
-| **SLZ L3**  | 53.4% |    71.6 MB/s |  **4,013 MB/s** |
-| **SLZ L5**  | 43.4% |    40.2 MB/s |  **4,081 MB/s** |
-| **SLZ L6**  | 27.4% |     3.2 MB/s |  1,061 MB/s |
-| **SLZ L8**  | 25.5% |     0.9 MB/s |  1,048 MB/s |
-| **SLZ L9**  | 27.4% |     3.3 MB/s |  1,012 MB/s |
-| **SLZ L11** | 25.5% |     0.2 MB/s |    994 MB/s |
+| LZ4       | 57.3% |     705 MB/s |  4,804 MB/s |
+| LZ4 HC 9  | 42.2% |    52.0 MB/s |  4,742 MB/s |
+| zstd 1    | 40.7% |     521 MB/s |  1,795 MB/s |
+| zstd 3    | 35.4% |     311 MB/s |  1,439 MB/s |
+| zstd 9    | 31.1% |    78.5 MB/s |  1,526 MB/s |
+| zstd 19   | 26.9% |     2.5 MB/s |  1,519 MB/s |
+| **SLZ L1**  | 54.9% |     404 MB/s |  **6,619 MB/s** |
+| **SLZ L3**  | 53.4% |    71.6 MB/s |  **3,992 MB/s** |
+| **SLZ L5**  | 43.4% |    39.4 MB/s |  **4,054 MB/s** |
+| **SLZ L6**  | 27.4% |     3.1 MB/s |  1,053 MB/s |
+| **SLZ L8**  | 25.5% |     0.9 MB/s |  1,054 MB/s |
+| **SLZ L9**  | 27.4% |     3.2 MB/s |  1,007 MB/s |
+| **SLZ L11** | 25.5% |     0.2 MB/s |    997 MB/s |
 
-At the fast tier: SLZ L1 decompresses **3.2x faster** than zstd 1
-(6.6 vs 2.1 GB/s) and **1.4x faster** than LZ4 (6.6 vs 4.8 GB/s).
-SLZ L5 matches LZ4 HC 9's ratio (43.4% vs 42.3%) while decoding
+At the fast tier: SLZ L1 decompresses **3.7x faster** than zstd 1
+(6.6 vs 1.8 GB/s) and **1.4x faster** than LZ4 (6.6 vs 4.8 GB/s).
+SLZ L5 matches LZ4 HC 9's ratio (43.4% vs 42.2%) while decoding
 nearly as fast (4.1 vs 4.7 GB/s). At the best-ratio tier:
-SLZ L11 achieves 25.5% vs zstd 19's 29.0%.
-
-[zstd-1t]: https://github.com/facebook/zstd/issues/2470#issuecomment-759613384
-
-> **Why was zstd decompress historically single-threaded?** Yann Collet
-> (zstd/LZ4 creator): *"[This is] due to a combination of being more
-> difficult to do, and less critical, since decompression is already
-> plenty fast with just a single thread (typically faster than SSD)."*
-> [<sup>†</sup>][zstd-1t] — The numbers above give zstd the same
-> block-parallel treatment as StreamLZ for a fair comparison. With
-> PCIe 4.0 at 7 GB/s and PCIe 5.0 at 12+ GB/s, single-threaded
-> decompress is no longer "faster than SSD."
+SLZ L11 achieves 25.5% vs zstd 19's 26.9%.
 
 ### vs zstd and LZ4 (single-threaded, silesia 203 MB)
 
 | Compressor | Ratio | Compress | Decompress |
 |-----------|-------|----------|------------|
-| LZ4       | 47.5% |     915 MB/s |  5,246 MB/s |
-| LZ4 HC 9  | 36.7% |    55.7 MB/s |  5,338 MB/s |
-| zstd 1    | 34.7% |     676 MB/s |  2,245 MB/s |
-| zstd 3    | 31.5% |     413 MB/s |  2,096 MB/s |
-| zstd 9    | 28.3% |     102 MB/s |  2,297 MB/s |
-| zstd 19   | 25.8% |     5.3 MB/s |  2,054 MB/s |
-| **SLZ L1**  | 45.8% |     632 MB/s |  **7,168 MB/s** |
-| **SLZ L3**  | 45.6% |    86.6 MB/s |  **3,522 MB/s** |
-| **SLZ L5**  | 37.6% |    50.2 MB/s |  **4,735 MB/s** |
-| **SLZ L6**  | 24.9% |     4.9 MB/s |  1,308 MB/s |
-| **SLZ L8**  | 24.3% |     1.2 MB/s |  1,321 MB/s |
-| **SLZ L9**  | 24.9% |     5.0 MB/s |  1,202 MB/s |
-| **SLZ L11** | 24.3% |     0.3 MB/s |  1,218 MB/s |
+| LZ4       | 47.4% |     961 MB/s |  5,102 MB/s |
+| LZ4 HC 9  | 36.6% |    55.2 MB/s |  5,102 MB/s |
+| zstd 1    | 34.4% |     699 MB/s |  2,010 MB/s |
+| zstd 3    | 31.1% |     428 MB/s |  1,765 MB/s |
+| zstd 9    | 27.8% |     109 MB/s |  1,892 MB/s |
+| zstd 19   | 24.8% |     3.9 MB/s |  1,737 MB/s |
+| **SLZ L1**  | 45.6% |     597 MB/s |  **6,902 MB/s** |
+| **SLZ L3**  | 45.5% |    83.9 MB/s |  **3,134 MB/s** |
+| **SLZ L5**  | 37.6% |    49.7 MB/s |  **4,420 MB/s** |
+| **SLZ L6**  | 24.9% |     4.6 MB/s |  1,304 MB/s |
+| **SLZ L8**  | 24.1% |     1.2 MB/s |  1,311 MB/s |
+| **SLZ L9**  | 24.9% |     4.8 MB/s |  1,257 MB/s |
+| **SLZ L11** | 24.1% |     0.3 MB/s |  1,234 MB/s |
 
 ### All levels (24 cores, enwik8)
 
