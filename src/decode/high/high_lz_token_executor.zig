@@ -373,20 +373,12 @@ pub fn resolveTokens(
             len_stream += 1;
         }
 
-        // Speculative offset load — always read offs_stream[0]; only
-        // consume (advance) when oi == 3.
         const new_off: i32 = offs_stream[0];
-
-        // CMOV chain (was tested vs jump table — CMOV wins).
-        var picked: i32 = ro3;
-        if (offset_index >= 1) picked = ro4;
-        if (offset_index >= 2) picked = ro5;
-        if (offset_index >= 3) picked = new_off;
-        const next_ro4: i32 = if (offset_index == 0) ro4 else ro3;
-        const next_ro5: i32 = if (offset_index < 2) ro5 else ro4;
+        const ro_arr = [4]i32{ ro3, ro4, ro5, new_off };
+        const picked: i32 = ro_arr[offset_index];
+        ro5 = if (offset_index < 2) ro5 else ro4;
+        ro4 = if (offset_index == 0) ro4 else ro3;
         ro3 = picked;
-        ro4 = next_ro4;
-        ro5 = next_ro5;
 
         // Branchless offs_stream advance: (oi + 1) & 4 is 0 for oi in
         // {0,1,2} and 4 (= sizeof(i32)) for oi == 3. Saves the branch
