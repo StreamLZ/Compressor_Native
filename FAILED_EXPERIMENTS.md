@@ -1274,3 +1274,166 @@ hinted) that its presence or absence doesn't measurably affect the hot
 loop. Keeping the prefetch is correct — zero cost on small/medium files
 and provides insurance on large working sets where far matches might
 miss L2.
+
+---
+
+## Zig 0.16 migration experiments (2026-04-29 — 2026-04-30)
+
+### Force-inline writeComplexOffset for LLVM 21 codegen recovery
+
+**Context**: LLVM 21 (Zig 0.16) generates 11% more dynamic instructions
+than LLVM 19 (Zig 0.15) for the L1 greedy parser. LLVM IR comparison
+showed LLVM 21 was NOT inlining `subtractBytes` (3 call sites in the
+hot path for L2+ delta-literal mode). For L1, the only out-of-line call
+in both versions was `writeComplexOffset`.
+
+**Experiment**: Marked `writeComplexOffset` as `pub inline fn`.
+
+**Result**: L1 compress **346 MB/s** (down from 368 baseline) — **6% slower**.
+The function body is large (~100 instructions) and inlining it bloated
+the hot loop, causing icache pressure and worse DSB decode efficiency.
+
+**Lesson**: LLVM 21's decision NOT to inline writeComplexOffset was
+correct. The function is too large for the icache benefit. The 0.15
+version had a bigger static function (484 vs 436 instructions) but
+LLVM 19 happened to generate fewer dynamic instructions via different
+loop structure choices — a codegen quality difference, not inlining.
+
+---
+
+### L1 decoder 2x loop unrolling
+
+**Context**: The L1 Fast codec inner loop processes one token per iteration
+with a back-edge branch. Hypothesis: processing 2 tokens per iteration
+halves the branch overhead.
+
+**Experiment**: Duplicated the token body (literal copy + match copy)
+to process tokens[0] and tokens[1] before looping back.
+
+**Result**: L1 decompress **6,520 MB/s** (down from 6,613 baseline) — **1.4%
+slower**. The original loop body (~20 µops) fits in the Loop Stream
+Detector (LSD) which replays decoded micro-ops without re-fetching.
+Doubling the body evicts it from LSD, losing the replay benefit.
+
+**Lesson**: On modern Intel CPUs, small loops that fit in the LSD (~64
+µops on Arrow Lake) should NOT be unrolled. The LSD provides free
+replay that outweighs the back-edge branch cost (which is near-zero
+anyway — backward branches are predicted taken with >99% accuracy).
+
+---
+
+### Single-pass decode+execute for High codec (L9-L11)
+
+**Context**: zstd's decompressor uses a single-pass architecture: decode
+one sequence from the bitstream and immediately copy literals + match.
+Our High codec uses two phases: (1) resolveTokens decodes all tokens
+into a buffer, (2) executeTokensType1 copies all literals + matches.
+The two-phase approach doubles memory traffic (token buffer write + read)
+and can evict match source data from cache between phases.
+
+**Experiment**: Merged resolveTokens and executeTokensType1 into a single
+loop. Also tried a zstd-style 8-sequence pipeline with ring buffer
+prefetch.
+
+**Results**:
+- Single-pass without prefetch: **1,027 MB/s** (vs 1,054 baseline) — **2.6% slower**
+- Single-pass with inline prefetch (current token): **1,028 MB/s** — same
+- Single-pass with 8-seq ring buffer prefetch: **1,031 MB/s** — still slower
+
+**Why**: The two-phase approach's 128-token prefetch lookahead in
+executeTokensType1 hides L2/L3 latency far better than the single-pass
+can. Each of our tokens is small (~12 bytes of output), so 8 tokens ahead
+only gives ~96 bytes / ~20 cycles of prefetch lead time — not enough to
+hide the ~200-cycle L3 latency. The two-phase design gives 128 × 12 =
+~1,536 bytes of lookahead. zstd's single-pass works because their
+sequences are larger (~30 bytes each) and their per-sequence decode is
+heavier (single interleaved bitstream = more CPU work to hide latency).
+
+**Lesson**: Two-phase resolve+execute is the right architecture for our
+format. The token buffer cost (~16% of resolveTokens cycles) is more
+than offset by the prefetch pipeline benefit.
+
+---
+
+### Non-temporal stores (movntdq) for token buffer writes
+
+**Context**: VTune showed resolveTokens is 54% memory-bound, with 1.6B
+stores per run writing 16 bytes per token to the token buffer. The
+buffer is ~112 MB for enwik8 L9 — larger than L3 cache. Hypothesis:
+non-temporal stores bypass cache and free up store buffer slots.
+
+**Experiment**: Replaced `tokens[token_index] = ...` with `movntdq`
+via inline assembly, writing the 4×i32 token as a 128-bit non-temporal
+store.
+
+**Result**: **1,023 MB/s** (vs 1,079 baseline) — **5.2% slower**.
+
+**Why**: The token buffer is read back immediately in executeTokensType1
+(phase 2). Non-temporal stores bypass ALL cache levels, so phase 2 loads
+come from DRAM (~100 cycles) instead of L3 (~40 cycles). Despite the
+buffer exceeding L3 capacity, enough of it remains resident in L3 during
+sequential write→read that normal stores win.
+
+**Lesson**: Non-temporal stores only help when the written data won't be
+read again for a long time (e.g., streaming output to disk). For write-
+then-read-soon patterns, even if the buffer exceeds cache size, the
+sequential access pattern keeps enough data warm in L3.
+
+---
+
+### 12-byte LzToken struct (u16 lit_len + match_len)
+
+**Context**: LzToken is 16 bytes (4 × i32). lit_len and match_len never
+exceed 65535, so u16 suffices. Shrinking to 12 bytes (i32 + i32 + u16 +
+u16) halves the bandwidth for those fields.
+
+**Result**: **1,055 MB/s** (vs 1,079 baseline) — **2.2% slower**.
+
+**Why**: 12-byte struct loses power-of-2 alignment. Array indexing
+`tokens[i]` requires a multiply by 12 (lea + add) instead of a shift
+by 4 (single shl). The indexing overhead exceeds the store bandwidth
+saved.
+
+**Lesson**: Token struct size should be a power of 2 for array indexing
+performance. The 4-byte waste per token is cheaper than the multiply.
+
+---
+
+### L11 BT4 depth=16 (reduced tree traversal)
+
+**Context**: VTune showed bt4SearchAndInsert at 51% of L11 compress
+cycles with CPI 2.0 (memory-bound — 1063% MemB metric). The BT4 tree
+traverses up to max_depth=128 nodes per position. Hypothesis: reducing
+depth trades ratio for speed.
+
+**Results** (enwik8 100 MB, L11 t1):
+
+| Depth | Ratio | Time | Speed |
+|-------|-------|------|-------|
+| 128 | 25.5% | 440s | 0.2 MB/s |
+| 16 | 26.9% | 293s | 0.3 MB/s |
+
+33% faster, 1.4pp ratio loss. Still only 0.3 MB/s — the tree
+insertion at every position is the bottleneck, not just the search
+depth.
+
+**Disposition**: Not adopted. The 1.4pp ratio loss is significant for
+L11's target use case (maximum compression). And 0.3 MB/s is still
+impractically slow for interactive use.
+
+---
+
+### L11 64 MB dictionary window (vs 128 MB)
+
+**Results** (enwik8 100 MB, L11 t1):
+
+| Dict Size | Ratio | Time | Speed |
+|-----------|-------|------|-------|
+| 128 MB | 25.5% | 440s | 0.2 MB/s |
+| 64 MB | 25.6% | 343s | 0.3 MB/s |
+
+22% faster with only 0.1pp ratio loss. The second half of enwik8
+barely benefits from referencing positions 64+ MB back.
+
+**Disposition**: Not adopted. Would need to be a per-level config
+option. May revisit if L11 speed becomes a priority.
