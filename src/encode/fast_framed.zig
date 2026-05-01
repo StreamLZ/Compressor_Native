@@ -336,7 +336,11 @@ pub fn compressFramedOne(
         else => unreachable,
     };
     var pos: usize = 0;
-    const sc_grp: u8 = lz_constants.default_sc_group_size;
+    const total_chunks = (src.len + lz_constants.chunk_size - 1) / lz_constants.chunk_size;
+    const sc_grp: u8 = if (opts.level == 1 and total_chunks > 16)
+        @intCast(@min(255, @max(4, total_chunks / 16)))
+    else
+        lz_constants.default_sc_group_size;
     const hdr_len = try frame.writeHeader(dst, .{
         .codec = .fast,
         .level = codec_level,
