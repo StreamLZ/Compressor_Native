@@ -707,6 +707,10 @@ fn runDecompress(allocator: std.mem.Allocator, io: std.Io, w: *std.Io.Writer, ar
     try w.print("decompressed {d} -> {d} bytes  ({s} -> {s})\n", .{
         src.len, written, in_path, out_path,
     });
+
+    // Forward-LZ diagnostic report (if any High codec chunks were decoded).
+    const high_runs = @import("decode/high/high_lz_token_executor.zig");
+    high_runs.reportFwdDiag();
 }
 
 // ─── Benchmark: compress + decompress (-b) ───────────────────────────

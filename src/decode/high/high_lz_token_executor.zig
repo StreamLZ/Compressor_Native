@@ -493,6 +493,161 @@ fn processLzRunsType1(
     }
 }
 
+// ────────────────────────────────────────────────────────────
+//  Forward-LZ diagnostic — global accumulator
+//  Enable with: comptime fwd_diag_enabled = true
+// ────────────────────────────────────────────────────────────
+
+const fwd_diag_enabled = false;
+
+const FwdDiag = struct {
+    const Entry = struct {
+        hash: u64 = 0,
+        total_bytes: u64 = 0,
+        occurrences: u32 = 0,
+        match_len: u32 = 0,
+    };
+
+    const max_buckets = 1 << 20; // 1M buckets
+    var buckets: [max_buckets]Entry = @splat(Entry{});
+    var total_match_bytes: u64 = 0;
+    var total_tokens: u64 = 0;
+    var chunks_seen: u32 = 0;
+
+    fn accumulate(tokens: [*]const LzToken, count: u32, dst_base: [*]const u8) void {
+        chunks_seen += 1;
+        for (0..count) |i| {
+            const t = tokens[i];
+            const match_len: usize = @intCast(t.match_len);
+            if (match_len < 2) continue;
+
+            total_match_bytes += match_len;
+            total_tokens += 1;
+
+            const match_start: [*]const u8 = dst_base + @as(usize, @intCast(t.dst_pos)) + @as(usize, @intCast(t.lit_len));
+
+            var h: u64 = @as(u64, match_len) *% 0x9E3779B97F4A7C15;
+            const hash_bytes = @min(match_len, 16);
+            for (0..hash_bytes) |b| {
+                h ^= @as(u64, match_start[b]) *% (@as(u64, 0x100000001B3) +% @as(u64, b) * 7);
+            }
+            h ^= h >> 33;
+            h *%= 0xFF51AFD7ED558CCD;
+            h ^= h >> 29;
+
+            const mask = max_buckets - 1;
+            var probe: usize = @intCast(h & mask);
+            for (0..128) |_| {
+                if (buckets[probe].occurrences == 0) {
+                    buckets[probe] = .{
+                        .hash = h,
+                        .total_bytes = match_len,
+                        .occurrences = 1,
+                        .match_len = @intCast(match_len),
+                    };
+                    break;
+                }
+                if (buckets[probe].hash == h and buckets[probe].match_len == match_len) {
+                    buckets[probe].total_bytes += match_len;
+                    buckets[probe].occurrences += 1;
+                    break;
+                }
+                probe = (probe + 1) & mask;
+            }
+        }
+    }
+
+    fn report() void {
+        // Collect all entries with occurrences >= 2 into a sortable list.
+        // Use a fixed-size buffer — count first.
+        var unique: u64 = 0;
+        var repeated: u64 = 0;
+        var repeated_bytes: u64 = 0;
+        var occ_2_5: u64 = 0;
+        var occ_2_5_bytes: u64 = 0;
+        var occ_6_10: u64 = 0;
+        var occ_6_10_bytes: u64 = 0;
+        var occ_11_50: u64 = 0;
+        var occ_11_50_bytes: u64 = 0;
+        var occ_51_plus: u64 = 0;
+        var occ_51_plus_bytes: u64 = 0;
+
+        var sorted_bytes: [65536]u64 = undefined;
+        var sorted_count: usize = 0;
+
+        for (0..max_buckets) |b| {
+            const occ = buckets[b].occurrences;
+            if (occ >= 1) unique += 1;
+            if (occ >= 2) {
+                repeated += 1;
+                repeated_bytes += buckets[b].total_bytes;
+                if (sorted_count < 65536) {
+                    sorted_bytes[sorted_count] = buckets[b].total_bytes;
+                    sorted_count += 1;
+                }
+                if (occ <= 5) { occ_2_5 += 1; occ_2_5_bytes += buckets[b].total_bytes; }
+                else if (occ <= 10) { occ_6_10 += 1; occ_6_10_bytes += buckets[b].total_bytes; }
+                else if (occ <= 30) { occ_11_50 += 1; occ_11_50_bytes += buckets[b].total_bytes; }
+                else { occ_51_plus += 1; occ_51_plus_bytes += buckets[b].total_bytes; }
+            }
+        }
+
+        // Sort descending.
+        const slice = sorted_bytes[0..sorted_count];
+        std.sort.pdq(u64, slice, {}, struct {
+            fn cmp(_: void, a: u64, b: u64) bool {
+                return a > b;
+            }
+        }.cmp);
+
+        std.debug.print("\n[FWD-LZ GLOBAL] {d} chunks, {d} tokens, {d} total match bytes\n", .{
+            chunks_seen, total_tokens, total_match_bytes,
+        });
+        std.debug.print("  {d} unique patterns, {d} repeated (>= 2 occurrences)\n", .{ unique, repeated });
+        std.debug.print("  Occurrence distribution:\n", .{});
+        std.debug.print("    2-5x:   {d:>8} patterns, {d:>12} bytes\n", .{ occ_2_5, occ_2_5_bytes });
+        std.debug.print("    6-10x:  {d:>8} patterns, {d:>12} bytes\n", .{ occ_6_10, occ_6_10_bytes });
+        std.debug.print("    11-30x: {d:>8} patterns, {d:>12} bytes\n", .{ occ_11_50, occ_11_50_bytes });
+        std.debug.print("    31+x:   {d:>8} patterns, {d:>12} bytes\n", .{ occ_51_plus, occ_51_plus_bytes });
+        std.debug.print("  repeated patterns cover {d} bytes = {d:.1}% of match bytes\n", .{
+            repeated_bytes,
+            @as(f64, @floatFromInt(repeated_bytes)) / @as(f64, @floatFromInt(@max(total_match_bytes, 1))) * 100.0,
+        });
+
+        // Cumulative coverage at percentiles.
+        std.debug.print("\n  Cumulative coverage (sorted by total bytes desc):\n", .{});
+        const milestones = [_]usize{ 10, 50, 100, 500, 1000, 5000, 10000, 50000 };
+        var cumul: u64 = 0;
+        var mi: usize = 0;
+        for (0..sorted_count) |i| {
+            cumul += slice[i];
+            if (mi < milestones.len and i + 1 == milestones[mi]) {
+                std.debug.print("    top {d:>6} patterns: {d:>12} bytes = {d:.1}% of match, {d:.1}% of output\n", .{
+                    milestones[mi], cumul,
+                    @as(f64, @floatFromInt(cumul)) / @as(f64, @floatFromInt(@max(total_match_bytes, 1))) * 100.0,
+                    @as(f64, @floatFromInt(cumul)) / @as(f64, @floatFromInt(@max(total_match_bytes + total_tokens * 2, 1))) * 100.0,
+                });
+                mi += 1;
+            }
+        }
+        // Final total.
+        std.debug.print("    all {d:>6} patterns: {d:>12} bytes = {d:.1}% of match\n", .{
+            sorted_count, cumul,
+            @as(f64, @floatFromInt(cumul)) / @as(f64, @floatFromInt(@max(total_match_bytes, 1))) * 100.0,
+        });
+    }
+};
+
+fn analyzeMatchPatterns(tokens: [*]const LzToken, count: u32, dst_base: [*]const u8) void {
+    if (comptime fwd_diag_enabled) FwdDiag.accumulate(tokens, count, dst_base);
+}
+
+pub fn reportFwdDiag() void {
+    if (comptime fwd_diag_enabled) {
+        if (FwdDiag.chunks_seen > 0) FwdDiag.report();
+    }
+}
+
 /// Prefetch this far ahead (in tokens) so the match source cache line is
 /// resident in L1 by the time we reach it. Uses 128 based on an Arrow
 /// Lake sweep (32→1376, 64→1547, 128→1541, 256→1514 MB/s). We match it.
